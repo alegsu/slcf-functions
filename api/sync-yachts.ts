@@ -65,6 +65,7 @@ export default async function handler(req: any, res: any) {
       .from("yachts")
       .upsert(rows, { onConflict: "wp_id" });
 
+
     if (error) throw error;
 
     return res.status(200).json({ ok: true, count: rows.length });
