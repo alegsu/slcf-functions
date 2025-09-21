@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import type { VercelRequest, VercelResponse } from '@vercel/node';
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 
@@ -11,25 +11,21 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-export const config = {
-  runtime: "edge",
-};
-
-export default async function handler(req: NextRequest) {
+export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
-    const body = await req.json();
+    const body = req.body || {};
     const conversation = body.conversation || [];
     const userName = body.user || "ospite";
 
-    // 1) Recupero lingua ultimo messaggio
+    // 1) Recupero ultimo messaggio utente
     const lastUserMessage = conversation.filter((m: any) => m.role === "user").pop()?.content || "";
-    let language = "it"; // default italiano
-    if (/[a-z]/i.test(lastUserMessage)) {
-      // naive detection con modello
+    let language = "it";
+
+    if (lastUserMessage) {
       const detect = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [
-          { role: "system", content: "Identify the language of the user message. Respond only with 'it' for Italian, 'en' for English, 'fr' for French, 'es' for Spanish, etc." },
+          { role: "system", content: "Detect the language of the message. Respond with 'it', 'en', 'fr', 'es', etc." },
           { role: "user", content: lastUserMessage }
         ],
         max_tokens: 5
@@ -37,27 +33,24 @@ export default async function handler(req: NextRequest) {
       language = detect.choices[0].message.content?.trim().toLowerCase() || "it";
     }
 
-    // 2) Query su supabase in base all'input (puoi arricchirla)
-    // Esempio molto semplice: prendi qualche yacht random come demo
+    // 2) Recupera yacht demo (limite 2)
     const { data: yachts } = await supabase
       .from("yachts")
       .select("*")
       .limit(2);
 
-    // 3) Costruisci prompt
-    const systemPrompt = `Sei un assistente per Sanlorenzo Charter Fleet. 
-Rispondi SEMPRE nella lingua ${language}. 
+    // 3) Prompt system
+    const systemPrompt = `Sei un assistente per Sanlorenzo Charter Fleet.
+Rispondi SEMPRE nella lingua ${language}.
 Se l'utente ha già fornito il suo nome (${userName}), usalo per personalizzare le risposte.
-I dati yacht disponibili sono nel seguente JSON (se vuoto rispondi che non hai trovato nulla):
-
-${JSON.stringify(yachts || [], null, 2)}`;
+Dati yacht disponibili (JSON): ${JSON.stringify(yachts || [], null, 2)}`;
 
     const messages = [
       { role: "system", content: systemPrompt },
       ...conversation
     ];
 
-    // 4) Chiamata modello
+    // 4) Chiamata al modello
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages,
@@ -67,13 +60,13 @@ ${JSON.stringify(yachts || [], null, 2)}`;
 
     const answer = completion.choices[0].message.content;
 
-    return NextResponse.json({
+    res.status(200).json({
       answer_markdown: answer,
       language,
       yachts
     });
   } catch (err: any) {
     console.error(err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    res.status(500).json({ error: err.message });
   }
 }
