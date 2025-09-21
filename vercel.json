@@ -4,7 +4,6 @@
     {
       "path": "/api/sync-yachts",
       "schedule": "0 */6 * * *"
-      // hexpressione cron: ogni 6 ore, all’inizio dell’ora (UTC)
     }
   ]
 }
