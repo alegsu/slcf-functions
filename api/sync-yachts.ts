@@ -63,7 +63,7 @@ export default async function handler(req: any, res: any) {
 
     const { error } = await supabase
       .from("yachts")
-      .upsert(rows, { onConflict: "wp_id,slug" });
+      .upsert(rows, { onConflict: "wp_id" });
 
     if (error) throw error;
 
