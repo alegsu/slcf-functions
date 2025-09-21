@@ -31,7 +31,10 @@ export default async function handler(req: any, res: any) {
 
     const r = await fetch(wpApi, { headers: { Accept: "application/json" } });
     if (!r.ok) throw new Error(`WP API ${r.status}`);
-    const items: WPYacht[] = await r.json();
+    let items: WPYacht[] = await r.json();
+
+// 🔎 filtro le versioni italiane (slug che finiscono con "-it")
+items = items.filter((y) => !y.slug?.endsWith("-it"));
 
     // mappo tutto in un'unica upsert bulk (veloce per i limiti delle serverless)
     const rows = items.map((y) => ({
