@@ -31,12 +31,25 @@ function expandDestinations(input: string[]): string[] {
 }
 
 // --- Query yachts ---
+// Sinonimi espliciti per Costa Azzurra
+const DEST_EQUIV: Record<string, string[]> = {
+  "costa azzurra": ["Costa Azzurra", "Côte d'Azur", "French Riviera", "Riviera Francese"]
+};
+
 // --- Query yachts ---
 async function queryYachts(filters: any, destinations: string[]) {
   let yachts: any[] = [];
-  const expanded = expandDestinations(destinations);
+  let expanded: string[] = [];
 
-  // Step 1: match esatto sulle destinazioni
+  // Espansione sinonimi specifici
+  for (const d of destinations) {
+    const key = d.toLowerCase();
+    if (DEST_EQUIV[key]) expanded.push(...DEST_EQUIV[key]);
+    expanded.push(d);
+  }
+  expanded = [...new Set(expanded)];
+
+  // Step 1: match diretto/esatto su array
   if (expanded.length > 0) {
     const { data, error } = await supabase
       .from("yachts")
@@ -44,11 +57,12 @@ async function queryYachts(filters: any, destinations: string[]) {
       .overlaps("destinations", expanded)
       .limit(20);
 
-    if (error) console.error("❌ Supabase error:", error);
-    if (data && data.length > 0) yachts = data;
+    if (!error && data && data.length > 0) {
+      yachts = data;
+    }
   }
 
-  // Step 2: fallback → se nulla trovato, allarghiamo a macro aree (Mediterraneo, ecc.)
+  // Step 2: fallback → ricerca LIKE nel testo destinazioni
   if (yachts.length === 0 && expanded.length > 0) {
     const orFilters = expanded.map((d) => `destinations::text.ilike.%${d}%`).join(",");
     const { data, error } = await supabase
@@ -57,8 +71,22 @@ async function queryYachts(filters: any, destinations: string[]) {
       .or(orFilters)
       .limit(20);
 
-    if (error) console.error("❌ Supabase error fallback:", error);
-    if (data && data.length > 0) yachts = data;
+    if (!error && data && data.length > 0) {
+      yachts = data;
+    }
+  }
+
+  // Step 3: fallback allargato → macro area Mediterraneo Occidentale
+  if (yachts.length === 0 && destinations.includes("Costa Azzurra")) {
+    const { data, error } = await supabase
+      .from("yachts")
+      .select("*")
+      .overlaps("destinations", ["Mediterraneo Occidentale", "Italia", "Isole Baleari", "Corsica"])
+      .limit(20);
+
+    if (!error && data && data.length > 0) {
+      yachts = data;
+    }
   }
 
   // Deduplica per slug
@@ -71,6 +99,8 @@ async function queryYachts(filters: any, destinations: string[]) {
 
   return Object.values(unique);
 }
+
+
 
 
 // --- Format yacht card ---
