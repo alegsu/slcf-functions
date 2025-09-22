@@ -71,25 +71,60 @@ async function extractFilters(text: string): Promise<any> {
   }
 }
 
-// ===== Query su Supabase =====
-async function queryYachts(filters: any) {
+// ===== Query di base =====
+async function baseQuery(filters: any, destinations: string[]) {
   let query = supabase.from("yachts").select("*");
 
   if (filters.guests_min) query = query.gte("guests", filters.guests_min);
   if (filters.budget_max) query = query.lte("rate_high", filters.budget_max);
 
-  if (filters.destinations && filters.destinations.length > 0) {
-    const expanded = expandDest(filters.destinations);
-    const term = expanded[0]; // prendi la prima canonica
+  if (destinations && destinations.length > 0) {
+    const term = destinations[0];
     query = query.ilike("destinations::text", `%${term}%`);
   }
 
   const { data, error } = await query.limit(10);
   if (error) {
     console.error("Supabase query error:", error);
-    return { data: [], note: { error: error.message } };
+    return [];
   }
-  return { data, note: {} };
+  return data || [];
+}
+
+// ===== Query con fallback =====
+async function queryYachts(filters: any) {
+  let note: any = {};
+
+  // Step 1: diretta
+  let data = await baseQuery(filters, filters.destinations || []);
+  if (data.length > 0) return { data, note: { mode: "direct" } };
+
+  // Step 2: macro-area
+  if (filters.destinations?.length) {
+    const expanded = expandDest(filters.destinations);
+    for (const d of expanded) {
+      data = await baseQuery(filters, [d]);
+      if (data.length > 0) return { data, note: { mode: "macro", base: filters.destinations[0], used: [d] } };
+    }
+  }
+
+  // Step 3: nearby
+  if (filters.destinations?.length) {
+    const nearList = DEST_NEARBY[filters.destinations[0]] || [];
+    for (const d of nearList) {
+      data = await baseQuery(filters, [d]);
+      if (data.length > 0) return { data, note: { mode: "nearby", base: filters.destinations[0], used: [d] } };
+    }
+  }
+
+  // Step 4: rilassa budget +20%
+  if (filters.budget_max) {
+    const relaxed = { ...filters, budget_max: Math.round(filters.budget_max * 1.2) };
+    data = await baseQuery(relaxed, filters.destinations || []);
+    if (data.length > 0) return { data, note: { mode: "relaxed_budget" } };
+  }
+
+  return { data: [], note: { mode: "none" } };
 }
 
 // ===== Formattazione yacht =====
@@ -118,7 +153,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
     const conversation = body.conversation || [];
-    const userName = body.user || "ospite";
 
     const lastUserMessage =
       (conversation as any[]).filter((m) => m.role === "user").pop()?.content || "";
@@ -138,7 +172,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // costruzione risposta
     let answer = "";
     if (count > 0) {
-      const list = (yachts || []).slice(0, 5).map(formatYachtItem).join("\n\n");
+      const list = yachts.slice(0, 5).map(formatYachtItem).join("\n\n");
       answer =
         (language.startsWith("en")
           ? `Here are some yachts matching your request:\n\n${list}\n\n*Rates per week, VAT & APA excluded.*`
@@ -146,8 +180,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     } else {
       answer =
         (language.startsWith("en")
-          ? `I couldn't find exact matches. Would you like to adjust budget or guests, or consider nearby areas?`
-          : `Non ho trovato corrispondenze esatte. Vuoi modificare budget o ospiti, oppure considerare aree vicine?`);
+          ? `No exact matches found. Would you like to adjust budget or guests, or consider nearby areas?`
+          : `Nessuna corrispondenza esatta trovata. Vuoi modificare budget o ospiti, oppure considerare aree vicine?`);
     }
 
     res.status(200).json({
