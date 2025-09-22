@@ -8,8 +8,30 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-// === 1. Classificazione intento ===
+// === Destinazioni note ===
+const KNOWN_DESTINATIONS = [
+  "Australia","Bahamas","Florida","Hong Kong","Mar Mediterraneo",
+  "Costa Azzurra","Croazia","East Med","Grecia","Isole Baleari",
+  "Italia","Mar Ionio","Mediterraneo Occidentale","Mediterraneo Orientale",
+  "Oceano Indiano","Oceano Pacifico Meridionale"
+];
+
+// === 1. Classificazione intento (ibrida) ===
 async function classifyIntent(message: string): Promise<"search" | "chat"> {
+  const msg = message.toLowerCase();
+
+  // Regole: parole chiave o destinazioni
+  if (
+    msg.includes("charter") ||
+    msg.includes("yacht") ||
+    msg.includes("barca") ||
+    msg.includes("crociera") ||
+    KNOWN_DESTINATIONS.some((d) => msg.includes(d.toLowerCase()))
+  ) {
+    return "search";
+  }
+
+  // Fallback AI
   const resp = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     messages: [
@@ -24,6 +46,7 @@ Rispondi SOLO con "search" o "chat".`,
     ],
     temperature: 0,
   });
+
   return (resp.choices[0].message.content || "chat").toLowerCase() as any;
 }
 
@@ -37,7 +60,7 @@ async function extractFilters(text: string): Promise<any> {
         content: `Estrai i filtri di ricerca yacht dall'input utente.
 Rispondi SOLO in JSON con schema:
 {
-  "destinations": ["Bahamas","Costa Azzurra","Grecia","Croazia","Italia","Isole Baleari","Florida","Australia","Hong Kong","Mar Mediterraneo","Mediterraneo Orientale","Mediterraneo Occidentale","Oceano Indiano","Oceano Pacifico Meridionale","East Med","Mar Ionio"],
+  "destinations": ["Australia","Bahamas","Florida","Hong Kong","Mar Mediterraneo","Costa Azzurra","Croazia","East Med","Grecia","Isole Baleari","Italia","Mar Ionio","Mediterraneo Occidentale","Mediterraneo Orientale","Oceano Indiano","Oceano Pacifico Meridionale"],
   "budget_max": int,
   "guests_min": int
 }
