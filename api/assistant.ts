@@ -8,39 +8,26 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-// --- Lista canonica delle destinazioni (come in WP/Supabase) ---
-const DEST_CANON = [
-  "Australia","Bahamas","Florida","Hong Kong","Mar Mediterraneo",
-  "Costa Azzurra","Croazia","East Med","Grecia","Isole Baleari",
-  "Italia","Mar Ionio","Mediterraneo Occidentale","Mediterraneo Orientale",
-  "Oceano Indiano","Oceano Pacifico Meridionale"
-];
+// === 1. Classificazione intento ===
+async function classifyIntent(message: string): Promise<"search" | "chat"> {
+  const resp = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "system",
+        content: `Separa messaggi in due categorie:
+- "search" se l'utente cerca uno yacht, parla di destinazioni, budget, ospiti, barca, noleggio, charter ecc.
+- "chat" se è saluto, battuta, domanda generica, o non riguarda yacht.
+Rispondi SOLO con "search" o "chat".`,
+      },
+      { role: "user", content: message },
+    ],
+    temperature: 0,
+  });
+  return (resp.choices[0].message.content || "chat").toLowerCase() as any;
+}
 
-// --- Sinonimi → destinazione canonica ---
-const DEST_EQUIV: Record<string, string> = {
-  "bahamas": "Bahamas",
-  "caribbean": "Bahamas",
-  "caraibi": "Bahamas",
-  "florida": "Florida",
-  "miami": "Florida",
-  "french riviera": "Costa Azzurra",
-  "cote d'azur": "Costa Azzurra",
-  "cote d'azure": "Costa Azzurra",
-  "riviera francese": "Costa Azzurra",
-  "east med": "East Med",
-  "west med": "Mediterraneo Occidentale",
-  "mediterranean": "Mar Mediterraneo",
-  "mar mediterraneo": "Mar Mediterraneo",
-};
-
-// --- Macro fallback ---
-const DEST_FALLBACK: Record<string, string[]> = {
-  "Costa Azzurra": ["Mediterraneo Occidentale", "Italia", "Corsica", "Isole Baleari"],
-  "Grecia": ["Mediterraneo Orientale", "Croazia", "Turchia"],
-  "Croazia": ["Mediterraneo Orientale", "Grecia", "Italia"],
-};
-
-// --- OpenAI: normalizza i filtri ---
+// === 2. Estrazione filtri yacht ===
 async function extractFilters(text: string): Promise<any> {
   const resp = await openai.chat.completions.create({
     model: "gpt-4o-mini",
@@ -50,13 +37,13 @@ async function extractFilters(text: string): Promise<any> {
         content: `Estrai i filtri di ricerca yacht dall'input utente.
 Rispondi SOLO in JSON con schema:
 {
-  "destinations": ${JSON.stringify(DEST_CANON)},
+  "destinations": ["Bahamas","Costa Azzurra","Grecia","Croazia","Italia","Isole Baleari","Florida","Australia","Hong Kong","Mar Mediterraneo","Mediterraneo Orientale","Mediterraneo Occidentale","Oceano Indiano","Oceano Pacifico Meridionale","East Med","Mar Ionio"],
   "budget_max": int,
   "guests_min": int
 }
-Se l'utente scrive una destinazione non presente, scegli la più simile tra queste.`
+Se l'utente scrive una destinazione non presente, scegli la più simile tra quelle indicate.`,
       },
-      { role: "user", content: text }
+      { role: "user", content: text },
     ],
     temperature: 0,
     response_format: { type: "json_object" },
@@ -69,80 +56,51 @@ Se l'utente scrive una destinazione non presente, scegli la più simile tra ques
   }
 }
 
-// --- Normalizza destinazioni a forma canonica ---
-function normalizeDestinations(list: string[] = []): string[] {
-  return list.map((d) => {
-    const key = d.trim().toLowerCase();
-    return (
-      DEST_EQUIV[key] ||
-      DEST_CANON.find((c) => c.toLowerCase() === key) ||
-      d
-    );
-  });
-}
-
-// --- Query yachts ---
+// === 3. Query su Supabase ===
 async function queryYachts(filters: any) {
-  let yachts: any[] = [];
-  let destinations = normalizeDestinations(filters.destinations);
+  let query = supabase.from("yachts").select("*").limit(10);
 
-  // Step 1: match diretto/esatto
-  if (destinations.length > 0) {
-    const { data } = await supabase
-      .from("yachts")
-      .select("*")
-      .overlaps("destinations", destinations)
-      .limit(20);
-    if (data && data.length > 0) yachts = data;
+  if (filters.guests_min) query = query.gte("guests", filters.guests_min);
+  if (filters.budget_max) query = query.lte("rate_high", filters.budget_max);
+
+  if (filters.destinations?.length > 0) {
+    query = query.overlaps("destinations", filters.destinations);
   }
 
-  // Step 2: fallback LIKE
-  if (yachts.length === 0 && destinations.length > 0) {
-    const orFilters = destinations.map((d) => `destinations::text.ilike.%${d}%`).join(",");
-    const { data } = await supabase
-      .from("yachts")
-      .select("*")
-      .or(orFilters)
-      .limit(20);
-    if (data && data.length > 0) yachts = data;
+  const { data, error } = await query;
+  if (error) {
+    console.error("Supabase query error:", error);
+    return [];
   }
-
-  // Step 3: macro fallback
-  if (yachts.length === 0 && destinations.length > 0) {
-    const key = destinations[0];
-    if (DEST_FALLBACK[key]) {
-      const { data } = await supabase
-        .from("yachts")
-        .select("*")
-        .overlaps("destinations", DEST_FALLBACK[key])
-        .limit(20);
-      if (data && data.length > 0) yachts = data;
-    }
-  }
-
-  // Deduplica per slug
-  const unique: Record<string, any> = {};
-  for (const y of yachts) {
-    if (!unique[y.slug]) unique[y.slug] = y;
-  }
-
-  return Object.values(unique);
+  return data || [];
 }
 
-// --- Format yacht card ---
+// === 4. Formattazione yacht ===
 function formatYachtItem(y: any) {
   const name = y.name || "Yacht";
   const model = y.model || y.series || "";
   const permalink = y.permalink || "#";
-  const img = Array.isArray(y.gallery_urls) && y.gallery_urls.length > 0 ? y.gallery_urls[0] : null;
+  const img =
+    Array.isArray(y.gallery_urls) && y.gallery_urls.length > 0
+      ? y.gallery_urls[0]
+      : null;
 
   const len = y.length_m ? `${Number(y.length_m).toFixed(1)} m` : "";
   const yr = y.year ? `${y.year}` : "";
-  const gc = (y.guests || y.cabins) ? `${y.guests || "-"} ospiti / ${y.cabins || "-"} cabine` : "";
-  const rate = (y.rate_low || y.rate_high)
-    ? `${y.rate_low ? y.rate_low.toLocaleString("it-IT") : "-"} - ${y.rate_high ? y.rate_high.toLocaleString("it-IT") : "-"} ${y.currency || "EUR"}`
-    : "";
-  const dest = Array.isArray(y.destinations) && y.destinations.length ? y.destinations.join(", ") : "";
+  const gc =
+    y.guests || y.cabins
+      ? `${y.guests || "-"} ospiti / ${y.cabins || "-"} cabine`
+      : "";
+  const rate =
+    y.rate_low || y.rate_high
+      ? `${y.rate_low?.toLocaleString("it-IT") || "-"} - ${
+          y.rate_high?.toLocaleString("it-IT") || "-"
+        } ${y.currency || "EUR"}`
+      : "";
+  const dest =
+    Array.isArray(y.destinations) && y.destinations.length
+      ? y.destinations.join(", ")
+      : "";
   const hl = y.highlights?.[0] || "";
 
   let md = `### ${name} (${model})\n`;
@@ -158,7 +116,7 @@ function formatYachtItem(y: any) {
   return md;
 }
 
-// --- Handler principale ---
+// === 5. Handler principale ===
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -166,27 +124,48 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method === "OPTIONS") return res.status(200).end();
 
   try {
-    const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+    const body =
+      typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
     const userMessage = body.message || "";
 
-    // Estrai filtri normalizzati dall'AI
-    const filters = await extractFilters(userMessage);
+    // 1) Classifica intento
+    const intent = await classifyIntent(userMessage);
 
-    // Query yachts
+    if (intent === "chat") {
+      // Risposta AI pura
+      const resp = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content:
+              "Sei l'assistente di Sanlorenzo Charter Fleet. Rispondi in modo gentile, breve e professionale.",
+          },
+          { role: "user", content: userMessage },
+        ],
+      });
+      const reply = resp.choices[0].message.content || "🙂";
+      return res.status(200).json({ answer_markdown: reply, mode: "chat" });
+    }
+
+    // 2) Se è ricerca: estrai filtri
+    const filters = await extractFilters(userMessage);
     const yachts = await queryYachts(filters);
 
     let answer = "";
     if (yachts.length > 0) {
       const list = yachts.slice(0, 5).map(formatYachtItem).join("\n\n");
-      answer = `Ho trovato queste opzioni per te:\n\n${list}\n\nVuoi una proposta personalizzata? Posso raccogliere i tuoi contatti.\n*Tariffe a settimana, VAT & APA esclusi.*`;
+      answer = `Ecco alcune opzioni in linea con la tua richiesta:\n\n${list}\n\n*Tariffe a settimana, VAT & APA esclusi.*`;
     } else {
-      answer = "Non ho trovato nulla con i criteri inseriti. Vuoi modificare budget o destinazione?";
+      answer =
+        "Non ho trovato yacht esatti per questi criteri. Vuoi che ti proponga aree vicine o con budget leggermente diverso?";
     }
 
     res.status(200).json({
       answer_markdown: answer,
+      mode: "search",
       filters_used: filters,
-      yachts: yachts,
+      yachts,
     });
   } catch (err: any) {
     console.error("Assistant error:", err);
