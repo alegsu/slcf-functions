@@ -5,10 +5,9 @@ import { createClient } from "@supabase/supabase-js";
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const supabase = createClient(
   process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY! // usa la service role key su Vercel
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-// --- Sinonimi destinazioni ---
 const destinationSynonyms: Record<string, string[]> = {
   "costa azzurra": ["Costa Azzurra", "French Riviera", "Riviera Francese"],
   "mediterraneo": ["Mar Mediterraneo", "Mediterraneo Occidentale", "Mediterraneo Orientale"],
@@ -30,7 +29,6 @@ function expandDestinations(input: string[]): string[] {
   return [...new Set(expanded)];
 }
 
-// --- Query yachts ---
 async function queryYachts(filters: any, destinations: string[]) {
   let query = supabase.from("yachts").select("*");
 
@@ -45,13 +43,12 @@ async function queryYachts(filters: any, destinations: string[]) {
 
   const { data, error } = await query.limit(10);
   if (error) {
-    console.error("Supabase query error:", error);
+    console.error("❌ Supabase query error:", error);
     return [];
   }
   return data || [];
 }
 
-// --- Format yacht card ---
 function formatYachtItem(y: any) {
   const name = y.name || "Yacht";
   const model = y.model || y.series || "";
@@ -80,50 +77,62 @@ function formatYachtItem(y: any) {
   return md;
 }
 
-// --- API route ---
 export async function POST(req: NextRequest) {
-  const body = await req.json();
-  const userMessage = body.message || "";
-  const lang = body.language || "it";
-
-  // estrai destinazioni con AI
-  const aiExtract = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      { role: "system", content: "Estrai dai messaggi destinazioni, budget massimo e numero minimo ospiti." },
-      { role: "user", content: userMessage }
-    ],
-    temperature: 0,
-    response_format: { type: "json_object" } // ✅ più semplice di json_schema
-  });
-
-  let filters: any = {};
-  let destinations: string[] = [];
   try {
-    const raw = aiExtract.choices[0].message.content;
-    filters = raw ? JSON.parse(raw) : {};
-    destinations = filters.destinations || [];
-  } catch (err) {
-    console.error("Parse error:", err);
-    filters = {};
-  }
+    console.log("✅ Assistant API called");
 
-  const yachts = await queryYachts(filters, destinations);
+    const body = await req.json();
+    console.log("📥 Request body:", body);
 
-  let answer = "";
-  if (yachts.length > 0) {
-    answer += "Ho trovato queste opzioni per te:\n\n";
-    yachts.forEach((y) => {
-      answer += formatYachtItem(y) + "\n\n";
+    const userMessage = body.message || "";
+    console.log("💬 User message:", userMessage);
+
+    const aiExtract = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: "Estrai dai messaggi destinazioni, budget massimo e numero minimo ospiti." },
+        { role: "user", content: userMessage }
+      ],
+      temperature: 0,
+      response_format: { type: "json_object" }
     });
-    answer += "\nVuoi una proposta personalizzata? Posso raccogliere i tuoi contatti.  \n*Tariffe a settimana, VAT & APA esclusi.*";
-  } else {
-    answer = "Non ho trovato nulla con i criteri inseriti. Vuoi modificare budget o destinazione?";
-  }
 
-  return NextResponse.json({
-    answer_markdown: answer,
-    filters_used: filters,
-    yachts: yachts,
-  });
+    console.log("🤖 Raw AI response:", aiExtract.choices[0].message);
+
+    let filters: any = {};
+    let destinations: string[] = [];
+    try {
+      const raw = aiExtract.choices[0].message.content;
+      filters = raw ? JSON.parse(raw) : {};
+      destinations = filters.destinations || [];
+    } catch (err) {
+      console.error("❌ Parse error:", err);
+      filters = {};
+    }
+
+    console.log("🎯 Filters:", filters);
+
+    const yachts = await queryYachts(filters, destinations);
+    console.log("🛥️ Found yachts:", yachts.length);
+
+    let answer = "";
+    if (yachts.length > 0) {
+      answer += "Ho trovato queste opzioni per te:\n\n";
+      yachts.forEach((y) => {
+        answer += formatYachtItem(y) + "\n\n";
+      });
+      answer += "\nVuoi una proposta personalizzata? Posso raccogliere i tuoi contatti.  \n*Tariffe a settimana, VAT & APA esclusi.*";
+    } else {
+      answer = "Non ho trovato nulla con i criteri inseriti. Vuoi modificare budget o destinazione?";
+    }
+
+    return NextResponse.json({
+      answer_markdown: answer,
+      filters_used: filters,
+      yachts: yachts,
+    });
+  } catch (err: any) {
+    console.error("❌ Assistant fatal error:", err);
+    return NextResponse.json({ error: err.message || String(err) }, { status: 500 });
+  }
 }
