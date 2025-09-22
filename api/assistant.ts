@@ -1,4 +1,3 @@
-// api/assistant.ts
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
@@ -9,10 +8,91 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-// === (alias, expansions, nearby) identici alla versione precedente ===
-// ... omesso per brevità ma incolla tutto quello che avevamo definito (DEST_ALIASES, DEST_EXPANDS, ecc.) ...
+// ===== Aliases ed espansioni =====
+const DEST_ALIASES: Record<string, string> = {
+  mediterraneo: "Mar Mediterraneo",
+  "mediterranean": "Mar Mediterraneo",
+  "west med": "Mediterraneo Occidentale",
+  "east med": "Mediterraneo Orientale",
+  "french riviera": "Costa Azzurra",
+};
 
-// helper format yacht
+const DEST_EXPANDS: Record<string, string[]> = {
+  "Mar Mediterraneo": ["Costa Azzurra", "Italia", "Grecia", "Spagna", "Isole Baleari", "Sardegna"],
+  "Mediterraneo Occidentale": ["Costa Azzurra", "Isole Baleari", "Corsica", "Sardegna", "Italia"],
+  "Mediterraneo Orientale": ["Grecia", "Croazia", "Turchia"],
+};
+
+const DEST_NEARBY: Record<string, string[]> = {
+  "Costa Azzurra": ["Corsica", "Isole Baleari", "Italia"],
+  "Grecia": ["Croazia", "Turchia"],
+};
+
+// Normalizza destinazioni
+function canonDest(name: string) {
+  if (!name) return name;
+  const lower = name.toLowerCase();
+  return DEST_ALIASES[lower] || name;
+}
+function expandDest(names: string[]): string[] {
+  let out: string[] = [];
+  names.forEach((n) => {
+    out.push(n);
+    if (DEST_EXPANDS[n]) out.push(...DEST_EXPANDS[n]);
+  });
+  return [...new Set(out)];
+}
+
+// ===== OpenAI helpers =====
+async function detectLanguage(text: string): Promise<string> {
+  const resp = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: "Detect the language of the user input. Reply only with the ISO code (it, en, fr...)." },
+      { role: "user", content: text },
+    ],
+  });
+  return resp.choices[0].message.content?.trim().toLowerCase() || "it";
+}
+
+async function extractFilters(text: string): Promise<any> {
+  const resp = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: "Extract yacht search filters from the text. Return JSON with keys: guests_min, budget_max, destinations (array of strings). If not present, return null or empty." },
+      { role: "user", content: text },
+    ],
+    response_format: { type: "json_object" },
+  });
+  try {
+    return JSON.parse(resp.choices[0].message.content || "{}");
+  } catch {
+    return {};
+  }
+}
+
+// ===== Query su Supabase =====
+async function queryYachts(filters: any) {
+  let query = supabase.from("yachts").select("*");
+
+  if (filters.guests_min) query = query.gte("guests", filters.guests_min);
+  if (filters.budget_max) query = query.lte("rate_high", filters.budget_max);
+
+  if (filters.destinations && filters.destinations.length > 0) {
+    const expanded = expandDest(filters.destinations);
+    const term = expanded[0]; // prendi la prima canonica
+    query = query.ilike("destinations::text", `%${term}%`);
+  }
+
+  const { data, error } = await query.limit(10);
+  if (error) {
+    console.error("Supabase query error:", error);
+    return { data: [], note: { error: error.message } };
+  }
+  return { data, note: {} };
+}
+
+// ===== Formattazione yacht =====
 function formatYachtItem(y: any) {
   const title = `**[${y.name} (${y.model || y.series || ""})](${y.permalink})**`;
   const len = y.length_m ? `${Number(y.length_m).toFixed(1)} m` : "";
@@ -28,6 +108,7 @@ function formatYachtItem(y: any) {
   return `- ${lines[0]}\n` + lines.slice(1).map(l => `  ${l}`).join("\n");
 }
 
+// ===== Handler principale =====
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -54,28 +135,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const { data: yachts, note } = await queryYachts(filters);
     const count = (yachts || []).length;
 
-    // costruzione risposta deterministica
-    let contextNote = "";
-    if (count === 0) {
-      if (note?.mode === "nearby") {
-        contextNote = language.startsWith("en")
-          ? `I couldn’t find exact availability there. Nearby areas: ${(note.used || []).join(", ")}.\n\n`
-          : `Non ho trovato disponibilità esatta in quell’area. Zone vicine: ${(note.used || []).join(", ")}.\n\n`;
-      } else if (note?.mode === "macro") {
-        contextNote = language.startsWith("en")
-          ? `I considered the macro-area “${note.base}”, including: ${(note.used || []).join(", ")}.\n\n`
-          : `Ho considerato la macro-area “${note.base}”, includendo: ${(note.used || []).join(", ")}.\n\n`;
-      } else if (note?.mode === "relaxed_budget") {
-        contextNote = language.startsWith("en")
-          ? `Showing some options slightly above budget.\n\n`
-          : `Alcune opzioni superano leggermente il budget indicato.\n\n`;
-      } else {
-        contextNote = language.startsWith("en")
-          ? `No exact matches for your criteria.\n\n`
-          : `Nessuna corrispondenza esatta per i criteri richiesti.\n\n`;
-      }
-    }
-
+    // costruzione risposta
     let answer = "";
     if (count > 0) {
       const list = (yachts || []).slice(0, 5).map(formatYachtItem).join("\n\n");
@@ -86,8 +146,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     } else {
       answer =
         (language.startsWith("en")
-          ? `${contextNote}Would you like to consider nearby areas or adjust guests/budget?`
-          : `${contextNote}Vuoi considerare aree vicine o modificare ospiti/budget?`);
+          ? `I couldn't find exact matches. Would you like to adjust budget or guests, or consider nearby areas?`
+          : `Non ho trovato corrispondenze esatte. Vuoi modificare budget o ospiti, oppure considerare aree vicine?`);
     }
 
     res.status(200).json({
@@ -104,3 +164,4 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     res.status(500).json({ error: err.message || String(err) });
   }
 }
+
