@@ -16,11 +16,11 @@ const KNOWN_DESTINATIONS = [
   "Oceano Indiano","Oceano Pacifico Meridionale"
 ];
 
-// === 1. Classificazione intento (ibrida) ===
+// === Classificazione intento (ibrida) ===
 async function classifyIntent(message: string): Promise<"search" | "chat"> {
   const msg = message.toLowerCase();
 
-  // Regole: parole chiave o destinazioni
+  // Regole fisse: se contiene parole chiave o destinazioni → search
   if (
     msg.includes("charter") ||
     msg.includes("yacht") ||
@@ -50,7 +50,7 @@ Rispondi SOLO con "search" o "chat".`,
   return (resp.choices[0].message.content || "chat").toLowerCase() as any;
 }
 
-// === 2. Estrazione filtri yacht ===
+// === Estrazione filtri yacht ===
 async function extractFilters(text: string): Promise<any> {
   const resp = await openai.chat.completions.create({
     model: "gpt-4o-mini",
@@ -79,7 +79,7 @@ Se l'utente scrive una destinazione non presente, scegli la più simile tra quel
   }
 }
 
-// === 3. Query su Supabase ===
+// === Query su Supabase ===
 async function queryYachts(filters: any) {
   let query = supabase.from("yachts").select("*").limit(10);
 
@@ -98,7 +98,7 @@ async function queryYachts(filters: any) {
   return data || [];
 }
 
-// === 4. Formattazione yacht ===
+// === Formattazione yacht ===
 function formatYachtItem(y: any) {
   const name = y.name || "Yacht";
   const model = y.model || y.series || "";
@@ -139,7 +139,7 @@ function formatYachtItem(y: any) {
   return md;
 }
 
-// === 5. Handler principale ===
+// === Handler principale ===
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -149,7 +149,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     const body =
       typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
-    const userMessage = body.message || "";
+
+    // ✅ supporto sia a message che a conversation
+    let userMessage = body.message || "";
+    if (!userMessage && Array.isArray(body.conversation)) {
+      const lastUser = body.conversation
+        .filter((m: any) => m.role === "user")
+        .pop();
+      if (lastUser) userMessage = lastUser.content;
+    }
+
+    if (!userMessage) {
+      return res.status(400).json({ error: "No user message provided" });
+    }
 
     // 1) Classifica intento
     const intent = await classifyIntent(userMessage);
