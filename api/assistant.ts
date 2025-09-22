@@ -183,9 +183,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(200).json({ answer_markdown: reply, mode: "chat" });
     }
 
-    // 2) Se è ricerca: estrai filtri
+       // 2) Se è ricerca: estrai filtri
     const filters = await extractFilters(userMessage);
-    const yachts = await queryYachts(filters);
+    let yachts = await queryYachts(filters);
+
+    // ✅ Deduplica per slug/wp_id
+    const seen = new Set();
+    yachts = yachts.filter((y: any) => {
+      const key = y.slug || y.wp_id || y.id;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 
     let answer = "";
     if (yachts.length > 0) {
