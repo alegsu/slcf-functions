@@ -129,19 +129,33 @@ async function queryYachts(filters: any) {
 
 // ===== Formattazione yacht =====
 function formatYachtItem(y: any) {
-  const title = `**[${y.name} (${y.model || y.series || ""})](${y.permalink})**`;
-  const len = y.length_m ? `${Number(y.length_m).toFixed(1)} m` : "";
-  const yr  = y.year ? `Anno: ${y.year}` : "";
-  const gc  = (y.guests || y.cabins) ? `Ospiti/Cabine: ${y.guests || "-"} / ${y.cabins || "-"}` : "";
-  const rate = (y.rate_low || y.rate_high)
-    ? `Tariffa settimanale: ${y.rate_low ? y.rate_low.toLocaleString("it-IT") : "-"} - ${y.rate_high ? y.rate_high.toLocaleString("it-IT") : "-"} ${y.currency || "EUR"}`
-    : "";
-  const dest = Array.isArray(y.destinations) && y.destinations.length ? `Destinazioni principali: ${y.destinations.join(", ")}` : "";
-  const hl   = y.highlights?.[0] ? `Punto forte: ${y.highlights[0]}` : "";
+  const name = y.name || "Yacht";
+  const model = y.model || y.series || "";
+  const permalink = y.permalink || "#";
+  const img = Array.isArray(y.gallery_urls) && y.gallery_urls.length > 0 ? y.gallery_urls[0] : null;
 
-  const lines = [title, len && `Lunghezza: ${len}`, yr, gc, rate, dest, hl].filter(Boolean);
-  return `- ${lines[0]}\n` + lines.slice(1).map(l => `  ${l}`).join("\n");
+  const len = y.length_m ? `${Number(y.length_m).toFixed(1)} m` : "";
+  const yr  = y.year ? `${y.year}` : "";
+  const gc  = (y.guests || y.cabins) ? `${y.guests || "-"} ospiti / ${y.cabins || "-"} cabine` : "";
+  const rate = (y.rate_low || y.rate_high)
+    ? `${y.rate_low ? y.rate_low.toLocaleString("it-IT") : "-"} - ${y.rate_high ? y.rate_high.toLocaleString("it-IT") : "-"} ${y.currency || "EUR"}`
+    : "";
+  const dest = Array.isArray(y.destinations) && y.destinations.length ? y.destinations.join(", ") : "";
+  const hl   = y.highlights?.[0] || "";
+
+  let md = `### ${name} (${model})\n`;
+  if (img) md += `![Preview](${img})\n`;
+  md += `- **Lunghezza:** ${len}\n`;
+  if (yr) md += `- **Anno:** ${yr}\n`;
+  if (gc) md += `- **Ospiti/Cabine:** ${gc}\n`;
+  if (rate) md += `- **Tariffa settimanale:** ${rate}\n`;
+  if (dest) md += `- **Destinazioni:** ${dest}\n`;
+  if (hl) md += `- **Punto forte:** ${hl}\n`;
+  md += `- [Scopri di più](${permalink})\n`;
+
+  return md;
 }
+
 
 // ===== Handler principale =====
 export default async function handler(req: VercelRequest, res: VercelResponse) {
