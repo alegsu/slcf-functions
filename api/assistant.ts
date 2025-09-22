@@ -31,30 +31,47 @@ function expandDestinations(input: string[]): string[] {
 }
 
 // --- Query yachts ---
+// --- Query yachts ---
 async function queryYachts(filters: any, destinations: string[]) {
-  let query = supabase.from("yachts").select("*");
+  let yachts: any[] = [];
+  const expanded = expandDestinations(destinations);
 
-  if (filters.guests_min) query = query.gte("guests", filters.guests_min);
-  if (filters.budget_max) query = query.lte("rate_high", filters.budget_max);
+  // Step 1: match esatto sulle destinazioni
+  if (expanded.length > 0) {
+    const { data, error } = await supabase
+      .from("yachts")
+      .select("*")
+      .overlaps("destinations", expanded)
+      .limit(20);
 
-  if (destinations && destinations.length > 0) {
-    const expanded = expandDestinations(destinations);
+    if (error) console.error("❌ Supabase error:", error);
+    if (data && data.length > 0) yachts = data;
+  }
 
-    // 🔹 Primo tentativo: array overlap
-    query = query.overlaps("destinations", expanded);
-
-    // 🔹 Fallback: se fosse jsonb o text → usa ilike
+  // Step 2: fallback → se nulla trovato, allarghiamo a macro aree (Mediterraneo, ecc.)
+  if (yachts.length === 0 && expanded.length > 0) {
     const orFilters = expanded.map((d) => `destinations::text.ilike.%${d}%`).join(",");
-    query = query.or(orFilters);
+    const { data, error } = await supabase
+      .from("yachts")
+      .select("*")
+      .or(orFilters)
+      .limit(20);
+
+    if (error) console.error("❌ Supabase error fallback:", error);
+    if (data && data.length > 0) yachts = data;
   }
 
-  const { data, error } = await query.limit(10);
-  if (error) {
-    console.error("❌ Supabase query error:", error);
-    return [];
+  // Deduplica per slug
+  const unique: Record<string, any> = {};
+  for (const y of yachts) {
+    if (!unique[y.slug]) {
+      unique[y.slug] = y;
+    }
   }
-  return data || [];
+
+  return Object.values(unique);
 }
+
 
 // --- Format yacht card ---
 function formatYachtItem(y: any) {
