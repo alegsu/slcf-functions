@@ -100,14 +100,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // estrai filtri con AI
     const aiExtract = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: "Estrai dai messaggi destinazioni, budget massimo e numero minimo ospiti." },
-        { role: "user", content: userMessage }
-      ],
-      temperature: 0,
-      response_format: { type: "json_object" }
-    });
+  model: "gpt-4o-mini",
+  messages: [
+    {
+      role: "system",
+      content:
+        "Estrai dai messaggi i filtri di ricerca yacht. Rispondi SOLO in JSON con questo schema: {\"destinations\": [..], \"budget_max\": int, \"guests_min\": int}."
+    },
+    { role: "user", content: userMessage }
+  ],
+  temperature: 0,
+  response_format: { type: "json_object" }
+});
+
 
     console.log("🤖 Raw AI response:", aiExtract.choices[0].message);
 
