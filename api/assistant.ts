@@ -5,43 +5,58 @@ import { createClient } from "@supabase/supabase-js";
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 const supabase = createClient(
   process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY! // ⚠️ service role key su Vercel
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-// --- Sinonimi destinazioni ---
-const destinationSynonyms: Record<string, string[]> = {
-  "costa azzurra": ["Costa Azzurra", "French Riviera", "Riviera Francese"],
-  "mediterraneo": ["Mar Mediterraneo", "Mediterraneo Occidentale", "Mediterraneo Orientale"],
+// --- Macro aree per fallback ---
+const DEST_EQUIV: Record<string, string[]> = {
+  "costa azzurra": ["Costa Azzurra", "Côte d'Azur", "French Riviera", "Riviera Francese"],
   "grecia": ["Grecia", "Isole Greche", "Cyclades", "Cicladi"],
   "croazia": ["Croazia", "Dalmazia", "Dubrovnik", "Spalato"],
+  "sardegna": ["Sardegna", "Costa Smeralda"],
+  "baleari": ["Isole Baleari", "Ibiza", "Mallorca", "Minorca"],
   "bahamas": ["Bahamas", "Caraibi", "Caribbean"],
 };
 
-function expandDestinations(input: string[]): string[] {
-  const expanded: string[] = [];
-  for (const d of input) {
-    const key = d.toLowerCase();
-    if (destinationSynonyms[key]) {
-      expanded.push(...destinationSynonyms[key]);
-    } else {
-      expanded.push(d);
-    }
+const DEST_FALLBACK: Record<string, string[]> = {
+  "costa azzurra": ["Mediterraneo Occidentale", "Italia", "Corsica", "Baleari"],
+  "grecia": ["Mediterraneo Orientale", "Croazia", "Turchia"],
+  "croazia": ["Mediterraneo Orientale", "Grecia", "Italia"],
+};
+
+// --- OpenAI: normalizza i filtri ---
+async function extractFilters(text: string): Promise<any> {
+  const resp = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "system",
+        content: `Estrai i filtri di ricerca yacht dall'input utente.
+Rispondi SOLO in JSON con schema:
+{"destinations":["Costa Azzurra","Grecia","Croazia","Sardegna","Baleari","Mediterraneo Occidentale","Mediterraneo Orientale","Caraibi","Bahamas"],"budget_max":int,"guests_min":int}
+
+Se la destinazione non è chiara, scegli la più probabile tra quelle elencate sopra.`
+      },
+      { role: "user", content: text }
+    ],
+    temperature: 0,
+    response_format: { type: "json_object" },
+  });
+
+  try {
+    return JSON.parse(resp.choices[0].message.content || "{}");
+  } catch {
+    return {};
   }
-  return [...new Set(expanded)];
 }
 
 // --- Query yachts ---
-// Sinonimi espliciti per Costa Azzurra
-const DEST_EQUIV: Record<string, string[]> = {
-  "costa azzurra": ["Costa Azzurra", "Côte d'Azur", "French Riviera", "Riviera Francese"]
-};
-
-// --- Query yachts ---
-async function queryYachts(filters: any, destinations: string[]) {
+async function queryYachts(filters: any) {
   let yachts: any[] = [];
-  let expanded: string[] = [];
+  const destinations = filters.destinations || [];
 
-  // Espansione sinonimi specifici
+  // Sinonimi espansi
+  let expanded: string[] = [];
   for (const d of destinations) {
     const key = d.toLowerCase();
     if (DEST_EQUIV[key]) expanded.push(...DEST_EQUIV[key]);
@@ -49,59 +64,48 @@ async function queryYachts(filters: any, destinations: string[]) {
   }
   expanded = [...new Set(expanded)];
 
-  // Step 1: match diretto/esatto su array
+  // Step 1: match diretto/esatto
   if (expanded.length > 0) {
-    const { data, error } = await supabase
+    const { data } = await supabase
       .from("yachts")
       .select("*")
       .overlaps("destinations", expanded)
       .limit(20);
-
-    if (!error && data && data.length > 0) {
-      yachts = data;
-    }
+    if (data && data.length > 0) yachts = data;
   }
 
-  // Step 2: fallback → ricerca LIKE nel testo destinazioni
+  // Step 2: fallback LIKE
   if (yachts.length === 0 && expanded.length > 0) {
     const orFilters = expanded.map((d) => `destinations::text.ilike.%${d}%`).join(",");
-    const { data, error } = await supabase
+    const { data } = await supabase
       .from("yachts")
       .select("*")
       .or(orFilters)
       .limit(20);
-
-    if (!error && data && data.length > 0) {
-      yachts = data;
-    }
+    if (data && data.length > 0) yachts = data;
   }
 
-  // Step 3: fallback allargato → macro area Mediterraneo Occidentale
-  if (yachts.length === 0 && destinations.includes("Costa Azzurra")) {
-    const { data, error } = await supabase
-      .from("yachts")
-      .select("*")
-      .overlaps("destinations", ["Mediterraneo Occidentale", "Italia", "Isole Baleari", "Corsica"])
-      .limit(20);
-
-    if (!error && data && data.length > 0) {
-      yachts = data;
+  // Step 3: macro fallback
+  if (yachts.length === 0 && destinations.length > 0) {
+    const key = destinations[0].toLowerCase();
+    if (DEST_FALLBACK[key]) {
+      const { data } = await supabase
+        .from("yachts")
+        .select("*")
+        .overlaps("destinations", DEST_FALLBACK[key])
+        .limit(20);
+      if (data && data.length > 0) yachts = data;
     }
   }
 
   // Deduplica per slug
   const unique: Record<string, any> = {};
   for (const y of yachts) {
-    if (!unique[y.slug]) {
-      unique[y.slug] = y;
-    }
+    if (!unique[y.slug]) unique[y.slug] = y;
   }
 
   return Object.values(unique);
 }
-
-
-
 
 // --- Format yacht card ---
 function formatYachtItem(y: any) {
@@ -132,7 +136,7 @@ function formatYachtItem(y: any) {
   return md;
 }
 
-// --- API handler ---
+// --- Handler principale ---
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -140,49 +144,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method === "OPTIONS") return res.status(200).end();
 
   try {
-    const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
+    const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
     const userMessage = body.message || "";
 
-    console.log("💬 User message:", userMessage);
+    // Estrai filtri normalizzati dall'AI
+    const filters = await extractFilters(userMessage);
 
-    // estrai filtri con AI
-    const aiExtract = await openai.chat.completions.create({
-  model: "gpt-4o-mini",
-  messages: [
-    {
-      role: "system",
-      content:
-        "Estrai dai messaggi i filtri di ricerca yacht. Rispondi SOLO in JSON con questo schema: {\"destinations\": [..], \"budget_max\": int, \"guests_min\": int}."
-    },
-    { role: "user", content: userMessage }
-  ],
-  temperature: 0,
-  response_format: { type: "json_object" }
-});
-
-
-    console.log("🤖 Raw AI response:", aiExtract.choices[0].message);
-
-    let filters: any = {};
-    let destinations: string[] = [];
-    try {
-      const raw = aiExtract.choices[0].message.content;
-      filters = raw ? JSON.parse(raw) : {};
-      destinations = filters.destinations || [];
-    } catch (err) {
-      console.error("❌ Parse error:", err);
-      filters = {};
-    }
-
-    const yachts = await queryYachts(filters, destinations);
+    // Query yachts
+    const yachts = await queryYachts(filters);
 
     let answer = "";
     if (yachts.length > 0) {
-      answer += "Ho trovato queste opzioni per te:\n\n";
-      yachts.forEach((y) => {
-        answer += formatYachtItem(y) + "\n\n";
-      });
-      answer += "\nVuoi una proposta personalizzata? Posso raccogliere i tuoi contatti.  \n*Tariffe a settimana, VAT & APA esclusi.*";
+      const list = yachts.slice(0, 5).map(formatYachtItem).join("\n\n");
+      answer = `Ho trovato queste opzioni per te:\n\n${list}\n\nVuoi una proposta personalizzata? Posso raccogliere i tuoi contatti.\n*Tariffe a settimana, VAT & APA esclusi.*`;
     } else {
       answer = "Non ho trovato nulla con i criteri inseriti. Vuoi modificare budget o destinazione?";
     }
@@ -193,8 +167,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       yachts: yachts,
     });
   } catch (err: any) {
-    console.error("❌ Assistant fatal error:", err);
+    console.error("Assistant error:", err);
     res.status(500).json({ error: err.message || String(err) });
   }
 }
-
