@@ -8,23 +8,36 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-// --- Macro aree per fallback ---
-const DEST_EQUIV: Record<string, string[]> = {
-  "cote d'azure": ["Costa Azzurra"],
-  "cote d'azur": ["Costa Azzurra"],
-  "riviera francese": ["Costa Azzurra","French Riviera"],
-  "mediterranean": ["Mar Mediterraneo"],
-  "west med": ["Mediterraneo Occidentale"],
-  "east med": ["East Med","Mediterraneo Orientale"],
-  "caribbean": ["Bahamas"],
-  "caraibi": ["Bahamas"],
-  "miami": ["Florida"],
+// --- Lista canonica delle destinazioni (come in WP/Supabase) ---
+const DEST_CANON = [
+  "Australia","Bahamas","Florida","Hong Kong","Mar Mediterraneo",
+  "Costa Azzurra","Croazia","East Med","Grecia","Isole Baleari",
+  "Italia","Mar Ionio","Mediterraneo Occidentale","Mediterraneo Orientale",
+  "Oceano Indiano","Oceano Pacifico Meridionale"
+];
+
+// --- Sinonimi → destinazione canonica ---
+const DEST_EQUIV: Record<string, string> = {
+  "bahamas": "Bahamas",
+  "caribbean": "Bahamas",
+  "caraibi": "Bahamas",
+  "florida": "Florida",
+  "miami": "Florida",
+  "french riviera": "Costa Azzurra",
+  "cote d'azur": "Costa Azzurra",
+  "cote d'azure": "Costa Azzurra",
+  "riviera francese": "Costa Azzurra",
+  "east med": "East Med",
+  "west med": "Mediterraneo Occidentale",
+  "mediterranean": "Mar Mediterraneo",
+  "mar mediterraneo": "Mar Mediterraneo",
 };
 
+// --- Macro fallback ---
 const DEST_FALLBACK: Record<string, string[]> = {
-  "costa azzurra": ["Mediterraneo Occidentale", "Italia", "Corsica", "Baleari"],
-  "grecia": ["Mediterraneo Orientale", "Croazia", "Turchia"],
-  "croazia": ["Mediterraneo Orientale", "Grecia", "Italia"],
+  "Costa Azzurra": ["Mediterraneo Occidentale", "Italia", "Corsica", "Isole Baleari"],
+  "Grecia": ["Mediterraneo Orientale", "Croazia", "Turchia"],
+  "Croazia": ["Mediterraneo Orientale", "Grecia", "Italia"],
 };
 
 // --- OpenAI: normalizza i filtri ---
@@ -34,20 +47,14 @@ async function extractFilters(text: string): Promise<any> {
     messages: [
       {
         role: "system",
-       content: `Estrai i filtri di ricerca yacht dall'input utente.
+        content: `Estrai i filtri di ricerca yacht dall'input utente.
 Rispondi SOLO in JSON con schema:
 {
-  "destinations": [
-    "Australia","Bahamas","Florida","Hong Kong","Mar Mediterraneo",
-    "Costa Azzurra","Croazia","East Med","Grecia","Isole Baleari",
-    "Italia","Mar Ionio","Mediterraneo Occidentale","Mediterraneo Orientale",
-    "Oceano Indiano","Oceano Pacifico Meridionale"
-  ],
+  "destinations": ${JSON.stringify(DEST_CANON)},
   "budget_max": int,
   "guests_min": int
 }
 Se l'utente scrive una destinazione non presente, scegli la più simile tra queste.`
-
       },
       { role: "user", content: text }
     ],
@@ -62,33 +69,36 @@ Se l'utente scrive una destinazione non presente, scegli la più simile tra ques
   }
 }
 
+// --- Normalizza destinazioni a forma canonica ---
+function normalizeDestinations(list: string[] = []): string[] {
+  return list.map((d) => {
+    const key = d.trim().toLowerCase();
+    return (
+      DEST_EQUIV[key] ||
+      DEST_CANON.find((c) => c.toLowerCase() === key) ||
+      d
+    );
+  });
+}
+
 // --- Query yachts ---
 async function queryYachts(filters: any) {
   let yachts: any[] = [];
-  const destinations = filters.destinations || [];
-
-  // Sinonimi espansi
-  let expanded: string[] = [];
-  for (const d of destinations) {
-    const key = d.toLowerCase();
-    if (DEST_EQUIV[key]) expanded.push(...DEST_EQUIV[key]);
-    expanded.push(d);
-  }
-  expanded = [...new Set(expanded)];
+  let destinations = normalizeDestinations(filters.destinations);
 
   // Step 1: match diretto/esatto
-  if (expanded.length > 0) {
+  if (destinations.length > 0) {
     const { data } = await supabase
       .from("yachts")
       .select("*")
-      .overlaps("destinations", expanded)
+      .overlaps("destinations", destinations)
       .limit(20);
     if (data && data.length > 0) yachts = data;
   }
 
   // Step 2: fallback LIKE
-  if (yachts.length === 0 && expanded.length > 0) {
-    const orFilters = expanded.map((d) => `destinations::text.ilike.%${d}%`).join(",");
+  if (yachts.length === 0 && destinations.length > 0) {
+    const orFilters = destinations.map((d) => `destinations::text.ilike.%${d}%`).join(",");
     const { data } = await supabase
       .from("yachts")
       .select("*")
@@ -99,7 +109,7 @@ async function queryYachts(filters: any) {
 
   // Step 3: macro fallback
   if (yachts.length === 0 && destinations.length > 0) {
-    const key = destinations[0].toLowerCase();
+    const key = destinations[0];
     if (DEST_FALLBACK[key]) {
       const { data } = await supabase
         .from("yachts")
