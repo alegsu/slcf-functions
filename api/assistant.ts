@@ -10,12 +10,15 @@ const supabase = createClient(
 
 // --- Macro aree per fallback ---
 const DEST_EQUIV: Record<string, string[]> = {
-  "costa azzurra": ["Costa Azzurra", "Côte d'Azur", "French Riviera", "Riviera Francese"],
-  "grecia": ["Grecia", "Isole Greche", "Cyclades", "Cicladi"],
-  "croazia": ["Croazia", "Dalmazia", "Dubrovnik", "Spalato"],
-  "sardegna": ["Sardegna", "Costa Smeralda"],
-  "baleari": ["Isole Baleari", "Ibiza", "Mallorca", "Minorca"],
-  "bahamas": ["Bahamas", "Caraibi", "Caribbean"],
+  "cote d'azure": ["Costa Azzurra"],
+  "cote d'azur": ["Costa Azzurra"],
+  "riviera francese": ["Costa Azzurra","French Riviera"],
+  "mediterranean": ["Mar Mediterraneo"],
+  "west med": ["Mediterraneo Occidentale"],
+  "east med": ["East Med","Mediterraneo Orientale"],
+  "caribbean": ["Bahamas"],
+  "caraibi": ["Bahamas"],
+  "miami": ["Florida"],
 };
 
 const DEST_FALLBACK: Record<string, string[]> = {
@@ -31,11 +34,20 @@ async function extractFilters(text: string): Promise<any> {
     messages: [
       {
         role: "system",
-        content: `Estrai i filtri di ricerca yacht dall'input utente.
+       content: `Estrai i filtri di ricerca yacht dall'input utente.
 Rispondi SOLO in JSON con schema:
-{"destinations":["Costa Azzurra","Grecia","Croazia","Sardegna","Baleari","Mediterraneo Occidentale","Mediterraneo Orientale","Caraibi","Bahamas"],"budget_max":int,"guests_min":int}
+{
+  "destinations": [
+    "Australia","Bahamas","Florida","Hong Kong","Mar Mediterraneo",
+    "Costa Azzurra","Croazia","East Med","Grecia","Isole Baleari",
+    "Italia","Mar Ionio","Mediterraneo Occidentale","Mediterraneo Orientale",
+    "Oceano Indiano","Oceano Pacifico Meridionale"
+  ],
+  "budget_max": int,
+  "guests_min": int
+}
+Se l'utente scrive una destinazione non presente, scegli la più simile tra queste.`
 
-Se la destinazione non è chiara, scegli la più probabile tra quelle elencate sopra.`
       },
       { role: "user", content: text }
     ],
