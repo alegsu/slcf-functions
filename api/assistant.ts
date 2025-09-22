@@ -1,13 +1,14 @@
-import { NextRequest, NextResponse } from "next/server";
+import type { VercelRequest, VercelResponse } from "@vercel/node";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 const supabase = createClient(
   process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
+  process.env.SUPABASE_SERVICE_ROLE_KEY! // ⚠️ Usa la Service Role Key su Vercel
 );
 
+// --- Sinonimi destinazioni ---
 const destinationSynonyms: Record<string, string[]> = {
   "costa azzurra": ["Costa Azzurra", "French Riviera", "Riviera Francese"],
   "mediterraneo": ["Mar Mediterraneo", "Mediterraneo Occidentale", "Mediterraneo Orientale"],
@@ -29,6 +30,7 @@ function expandDestinations(input: string[]): string[] {
   return [...new Set(expanded)];
 }
 
+// --- Query yachts ---
 async function queryYachts(filters: any, destinations: string[]) {
   let query = supabase.from("yachts").select("*");
 
@@ -49,6 +51,7 @@ async function queryYachts(filters: any, destinations: string[]) {
   return data || [];
 }
 
+// --- Format yacht card ---
 function formatYachtItem(y: any) {
   const name = y.name || "Yacht";
   const model = y.model || y.series || "";
@@ -77,16 +80,20 @@ function formatYachtItem(y: any) {
   return md;
 }
 
-export async function POST(req: NextRequest) {
+// --- API handler ---
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.status(200).end();
+
   try {
-    console.log("✅ Assistant API called");
-
-    const body = await req.json();
-    console.log("📥 Request body:", body);
-
+    const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
     const userMessage = body.message || "";
+
     console.log("💬 User message:", userMessage);
 
+    // estrai filtri con AI
     const aiExtract = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
@@ -110,10 +117,7 @@ export async function POST(req: NextRequest) {
       filters = {};
     }
 
-    console.log("🎯 Filters:", filters);
-
     const yachts = await queryYachts(filters, destinations);
-    console.log("🛥️ Found yachts:", yachts.length);
 
     let answer = "";
     if (yachts.length > 0) {
@@ -126,13 +130,13 @@ export async function POST(req: NextRequest) {
       answer = "Non ho trovato nulla con i criteri inseriti. Vuoi modificare budget o destinazione?";
     }
 
-    return NextResponse.json({
+    res.status(200).json({
       answer_markdown: answer,
       filters_used: filters,
       yachts: yachts,
     });
   } catch (err: any) {
     console.error("❌ Assistant fatal error:", err);
-    return NextResponse.json({ error: err.message || String(err) }, { status: 500 });
+    res.status(500).json({ error: err.message || String(err) });
   }
 }
