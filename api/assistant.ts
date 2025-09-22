@@ -3,7 +3,10 @@ import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_KEY!);
+const supabase = createClient(
+  process.env.SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY! // usa la service role key su Vercel
+);
 
 // --- Sinonimi destinazioni ---
 const destinationSynonyms: Record<string, string[]> = {
@@ -35,10 +38,7 @@ async function queryYachts(filters: any, destinations: string[]) {
   if (filters.budget_max) query = query.lte("rate_high", filters.budget_max);
 
   if (destinations && destinations.length > 0) {
-    // espandi sinonimi
     const expanded = expandDestinations(destinations);
-
-    // usa il primo termine per ILIKE (fallback se overlaps fallisce)
     const term = expanded[0];
     query = query.ilike("destinations::text", `%${term}%`);
   }
@@ -94,26 +94,17 @@ export async function POST(req: NextRequest) {
       { role: "user", content: userMessage }
     ],
     temperature: 0,
-    response_format: { type: "json_schema", json_schema: {
-      name: "filters",
-      schema: {
-        type: "object",
-        properties: {
-          destinations: { type: "array", items: { type: "string" } },
-          budget_max: { type: "integer" },
-          guests_min: { type: "integer" }
-        },
-        required: []
-      }
-    }}
+    response_format: { type: "json_object" } // ✅ più semplice di json_schema
   });
 
-  let filters = {};
+  let filters: any = {};
   let destinations: string[] = [];
   try {
-    filters = JSON.parse(aiExtract.choices[0].message.content || "{}");
+    const raw = aiExtract.choices[0].message.content;
+    filters = raw ? JSON.parse(raw) : {};
     destinations = filters.destinations || [];
-  } catch {
+  } catch (err) {
+    console.error("Parse error:", err);
     filters = {};
   }
 
@@ -136,4 +127,3 @@ export async function POST(req: NextRequest) {
     yachts: yachts,
   });
 }
-
