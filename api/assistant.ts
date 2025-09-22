@@ -5,7 +5,7 @@ import { createClient } from "@supabase/supabase-js";
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 const supabase = createClient(
   process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY! // ⚠️ Usa la Service Role Key su Vercel
+  process.env.SUPABASE_SERVICE_ROLE_KEY! // ⚠️ usa la Service Role Key su Vercel
 );
 
 // --- Sinonimi destinazioni ---
@@ -39,8 +39,7 @@ async function queryYachts(filters: any, destinations: string[]) {
 
   if (destinations && destinations.length > 0) {
     const expanded = expandDestinations(destinations);
-    const term = expanded[0];
-    query = query.ilike("destinations::text", `%${term}%`);
+    query = query.overlaps("destinations", expanded); // ✅ match su array destinazioni
   }
 
   const { data, error } = await query.limit(10);
