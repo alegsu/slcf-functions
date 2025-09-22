@@ -79,8 +79,8 @@ async function baseQuery(filters: any, destinations: string[]) {
   if (filters.budget_max) query = query.lte("rate_high", filters.budget_max);
 
   if (destinations && destinations.length > 0) {
-    const term = destinations[0];
-    query = query.ilike("destinations::text", `%${term}%`);
+    // ✅ Usa overlaps con array
+    query = query.overlaps("destinations", destinations);
   }
 
   const { data, error } = await query.limit(10);
@@ -198,4 +198,3 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     res.status(500).json({ error: err.message || String(err) });
   }
 }
-
