@@ -16,11 +16,19 @@ const KNOWN_DESTINATIONS = [
   "Oceano Indiano","Oceano Pacifico Meridionale"
 ];
 
-// === Classificazione intento (ibrida) ===
-async function classifyIntent(message: string): Promise<"search" | "chat"> {
+// === Mini FAQ (statiche) ===
+const FAQ: Record<string, string> = {
+  "come posso prenotare": "Puoi prenotare lasciando i tuoi dati qui in chat 📩. Ti contatteremo entro poche ore per confermare i dettagli.",
+  "posso prenotare per un giorno": "I charter sono normalmente settimanali ⛵️, ma in alcuni casi particolari possiamo valutare richieste più brevi.",
+  "cosa significa charter": "Charter significa noleggio esclusivo di uno yacht con equipaggio 👨‍✈️ per un periodo determinato.",
+  "cosa significa apa": "APA = Advance Provisioning Allowance. È un fondo anticipato (circa 30% del noleggio) che copre carburante, porti, cibo, bevande e altre spese di bordo.",
+};
+
+// === Intent classifier (5 categorie) ===
+async function classifyIntent(message: string): Promise<"search"|"booking"|"info"|"smalltalk"|"other"> {
   const msg = message.toLowerCase();
 
-  // Regole fisse: se contiene parole chiave o destinazioni → search
+  // Regole fisse: parole chiave e destinazioni
   if (
     msg.includes("charter") ||
     msg.includes("yacht") ||
@@ -31,23 +39,28 @@ async function classifyIntent(message: string): Promise<"search" | "chat"> {
     return "search";
   }
 
-  // Fallback AI
+  // AI classification
   const resp = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     messages: [
       {
         role: "system",
-        content: `Separa messaggi in due categorie:
-- "search" se l'utente cerca uno yacht, parla di destinazioni, budget, ospiti, barca, noleggio, charter ecc.
-- "chat" se è saluto, battuta, domanda generica, o non riguarda yacht.
-Rispondi SOLO con "search" o "chat".`,
+        content: `Classifica l'intento dell'utente in una di queste categorie:
+- "search": cerca uno yacht (destinazione, budget, ospiti, charter, noleggio).
+- "booking": domande su prenotazioni, durata, pagamenti.
+- "info": definizioni o spiegazioni (es. cosa significa charter, cos'è APA).
+- "smalltalk": saluti, battute, convenevoli.
+- "other": tutto il resto.
+
+Rispondi SOLO con una di queste parole.`,
       },
       { role: "user", content: message },
     ],
     temperature: 0,
   });
 
-  return (resp.choices[0].message.content || "chat").toLowerCase() as any;
+  const intent = resp.choices[0].message.content?.toLowerCase().trim() as any;
+  return ["search","booking","info","smalltalk","other"].includes(intent) ? intent : "other";
 }
 
 // === Estrazione filtri yacht ===
@@ -96,6 +109,17 @@ async function queryYachts(filters: any) {
     return [];
   }
   return data || [];
+}
+
+// === Deduplica yachts ===
+function dedupYachts(yachts: any[]) {
+  const seen = new Set();
+  return yachts.filter((y) => {
+    const key = y.slug || y.wp_id || y.id;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 // === Formattazione yacht ===
@@ -150,7 +174,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const body =
       typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
 
-    // ✅ supporto sia a message che a conversation
+    // Supporto sia message che conversation
     let userMessage = body.message || "";
     if (!userMessage && Array.isArray(body.conversation)) {
       const lastUser = body.conversation
@@ -166,50 +190,69 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // 1) Classifica intento
     const intent = await classifyIntent(userMessage);
 
-    if (intent === "chat") {
-      // Risposta AI pura
+    // 2) Gestione per intento
+    if (intent === "smalltalk") {
+      return res.status(200).json({
+        answer_markdown: "🙂 Certo! Dimmi pure, sono qui per aiutarti.",
+        mode: "smalltalk",
+      });
+    }
+
+    if (intent === "booking" || intent === "info") {
+      // Match su FAQ
+      const key = Object.keys(FAQ).find((q) =>
+        userMessage.toLowerCase().includes(q)
+      );
+      if (key) {
+        return res.status(200).json({
+          answer_markdown: FAQ[key],
+          mode: intent,
+        });
+      }
+
+      // fallback GPT
       const resp = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [
           {
             role: "system",
             content:
-              "Sei l'assistente di Sanlorenzo Charter Fleet. Rispondi in modo gentile, breve e professionale.",
+              "Sei l'assistente di Sanlorenzo Charter Fleet. Rispondi in modo breve e chiaro a domande su prenotazioni e informazioni.",
           },
           { role: "user", content: userMessage },
         ],
       });
       const reply = resp.choices[0].message.content || "🙂";
-      return res.status(200).json({ answer_markdown: reply, mode: "chat" });
+      return res.status(200).json({ answer_markdown: reply, mode: intent });
     }
 
-       // 2) Se è ricerca: estrai filtri
-    const filters = await extractFilters(userMessage);
-    let yachts = await queryYachts(filters);
+    if (intent === "search") {
+      const filters = await extractFilters(userMessage);
+      let yachts = await queryYachts(filters);
+      yachts = dedupYachts(yachts);
 
-    // ✅ Deduplica per slug/wp_id
-    const seen = new Set();
-    yachts = yachts.filter((y: any) => {
-      const key = y.slug || y.wp_id || y.id;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+      let answer = "";
+      if (yachts.length > 0) {
+        const list = yachts.slice(0, 5).map(formatYachtItem).join("\n\n");
+        answer = `Ecco alcune opzioni in linea con la tua richiesta:\n\n${list}\n\n*Tariffe a settimana, VAT & APA esclusi.*`;
+      } else {
+        answer =
+          "Non ho trovato yacht esatti per questi criteri. Vuoi che ti proponga aree vicine o con budget leggermente diverso?";
+      }
 
-    let answer = "";
-    if (yachts.length > 0) {
-      const list = yachts.slice(0, 5).map(formatYachtItem).join("\n\n");
-      answer = `Ecco alcune opzioni in linea con la tua richiesta:\n\n${list}\n\n*Tariffe a settimana, VAT & APA esclusi.*`;
-    } else {
-      answer =
-        "Non ho trovato yacht esatti per questi criteri. Vuoi che ti proponga aree vicine o con budget leggermente diverso?";
+      return res.status(200).json({
+        answer_markdown: answer,
+        mode: "search",
+        filters_used: filters,
+        yachts,
+      });
     }
 
-    res.status(200).json({
-      answer_markdown: answer,
-      mode: "search",
-      filters_used: filters,
-      yachts,
+    // other
+    return res.status(200).json({
+      answer_markdown:
+        "Posso aiutarti a trovare il tuo prossimo yacht o darti informazioni sui nostri servizi. Dimmi pure cosa cerchi 🚤",
+      mode: "other",
     });
   } catch (err: any) {
     console.error("Assistant error:", err);
