@@ -28,16 +28,64 @@ const FAQ: Record<string, string> = {
 async function classifyIntent(message: string): Promise<"search"|"booking"|"info"|"smalltalk"|"other"> {
   const msg = message.toLowerCase();
 
-  // Regole fisse: parole chiave e destinazioni
+  // --- smalltalk ---
+  if (/(ciao|hello|hi|buongiorno|buonasera|hey)/.test(msg)) {
+    return "smalltalk";
+  }
+
+  // --- booking keywords ---
+  if (/(prenot|book|riserv|pagament|costo)/.test(msg)) {
+    return "booking";
+  }
+
+  // --- info keywords ---
+  if (/(cosa significa|come funziona|spiega|explain|what is)/.test(msg)) {
+    return "info";
+  }
+
+  // --- charter special case ---
+  if (msg.includes("charter")) {
+    // se non ci sono parole di ricerca "forti", lo tratto come info
+    const searchHints = ["yacht","barca","noleggio","bahamas","grecia","italia","costa","ospiti","cabine","budget","prezzo"];
+    if (!searchHints.some((h) => msg.includes(h))) {
+      return "info";
+    }
+  }
+
+  // --- search keywords / destinazioni note ---
   if (
-    msg.includes("charter") ||
     msg.includes("yacht") ||
     msg.includes("barca") ||
-    msg.includes("crociera") ||
+    msg.includes("noleggio") ||
     KNOWN_DESTINATIONS.some((d) => msg.includes(d.toLowerCase()))
   ) {
     return "search";
   }
+
+  // --- fallback AI classification ---
+  const resp = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "system",
+        content: `Classifica l'intento dell'utente in una di queste categorie:
+- "search"
+- "booking"
+- "info"
+- "smalltalk"
+- "other"
+
+Rispondi SOLO con la parola.`,
+      },
+      { role: "user", content: message },
+    ],
+    temperature: 0,
+  });
+
+  const intent = resp.choices[0].message.content?.toLowerCase().trim() as any;
+  return ["search","booking","info","smalltalk","other"].includes(intent) ? intent : "other";
+}
+
 
   // AI classification
   const resp = await openai.chat.completions.create({
