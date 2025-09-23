@@ -8,7 +8,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-// === Destinazioni note ===
+// --- Destinazioni note dal tuo WP ---
 const KNOWN_DESTINATIONS = [
   "Australia","Bahamas","Florida","Hong Kong","Mar Mediterraneo",
   "Costa Azzurra","Croazia","East Med","Grecia","Isole Baleari",
@@ -16,102 +16,58 @@ const KNOWN_DESTINATIONS = [
   "Oceano Indiano","Oceano Pacifico Meridionale"
 ];
 
-// === Mini FAQ (statiche) ===
-const FAQ: Record<string, string> = {
-  "come posso prenotare": "Puoi prenotare lasciando i tuoi dati qui in chat 📩. Ti contatteremo entro poche ore per confermare i dettagli.",
-  "posso prenotare per un giorno": "I charter sono normalmente settimanali ⛵️, ma in alcuni casi particolari possiamo valutare richieste più brevi.",
-  "cosa significa charter": "Charter significa noleggio esclusivo di uno yacht con equipaggio 👨‍✈️ per un periodo determinato.",
-  "cosa significa apa": "APA = Advance Provisioning Allowance. È un fondo anticipato (circa 30% del noleggio) che copre carburante, porti, cibo, bevande e altre spese di bordo.",
+// --- Alias e fallback ---
+const DEST_EQUIV: Record<string,string[]> = {
+  "cannes": ["Costa Azzurra"],
+  "nice": ["Costa Azzurra"],
+  "monaco": ["Costa Azzurra"],
+  "french riviera": ["Costa Azzurra"],
+  "riviera francese": ["Costa Azzurra"],
+  "cote d'azur": ["Costa Azzurra"],
+  "cote d'azure": ["Costa Azzurra"],
+  "caribbean": ["Bahamas"],
+  "caraibi": ["Bahamas"],
+  "miami": ["Florida"],
 };
 
-// === Intent classifier (5 categorie) ===
+const DEST_FALLBACK: Record<string,string[]> = {
+  "costa azzurra": ["Mediterraneo Occidentale","Italia","Corsica","Isole Baleari"],
+  "grecia": ["Mediterraneo Orientale","Croazia","Turchia"],
+  "croazia": ["Mediterraneo Orientale","Grecia","Italia"],
+};
+
+// --- Intent detection ibrido ---
 async function classifyIntent(message: string): Promise<"search"|"booking"|"info"|"smalltalk"|"other"> {
   const msg = message.toLowerCase();
 
-  // --- smalltalk ---
-  if (/(ciao|hello|hi|buongiorno|buonasera|hey)/.test(msg)) {
-    return "smalltalk";
-  }
+  if (/(ciao|hello|hi|buongiorno|buonasera|hey)/.test(msg)) return "smalltalk";
+  if (/(prenot|book|riserv|pagament|costo)/.test(msg)) return "booking";
+  if (/(cosa significa|come funziona|explain|spiega|what is)/.test(msg)) return "info";
 
-  // --- booking keywords ---
-  if (/(prenot|book|riserv|pagament|costo)/.test(msg)) {
-    return "booking";
-  }
-
-  // --- info keywords ---
-  if (/(cosa significa|come funziona|spiega|explain|what is)/.test(msg)) {
-    return "info";
-  }
-
-  // --- charter special case ---
   if (msg.includes("charter")) {
-    // se non ci sono parole di ricerca "forti", lo tratto come info
     const searchHints = ["yacht","barca","noleggio","bahamas","grecia","italia","costa","ospiti","cabine","budget","prezzo"];
-    if (!searchHints.some((h) => msg.includes(h))) {
-      return "info";
-    }
+    if (!searchHints.some((h) => msg.includes(h))) return "info";
   }
 
-  // --- search keywords / destinazioni note ---
-  if (
-    msg.includes("yacht") ||
-    msg.includes("barca") ||
-    msg.includes("noleggio") ||
-    KNOWN_DESTINATIONS.some((d) => msg.includes(d.toLowerCase()))
-  ) {
+  if (msg.includes("yacht") || msg.includes("barca") || msg.includes("noleggio") ||
+      KNOWN_DESTINATIONS.some((d) => msg.includes(d.toLowerCase()))) {
     return "search";
   }
 
-  // --- fallback AI classification ---
+  // fallback via AI
   const resp = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     messages: [
-      {
-        role: "system",
-        content: `Classifica l'intento dell'utente in una di queste categorie:
-- "search"
-- "booking"
-- "info"
-- "smalltalk"
-- "other"
-
-Rispondi SOLO con la parola.`,
-      },
-      { role: "user", content: message },
+      { role: "system", content: "Classifica il messaggio in search | booking | info | smalltalk | other. Rispondi solo con una parola." },
+      { role: "user", content: message }
     ],
-    temperature: 0,
+    temperature: 0
   });
-
   const intent = resp.choices[0].message.content?.toLowerCase().trim() as any;
   return ["search","booking","info","smalltalk","other"].includes(intent) ? intent : "other";
 }
 
-
-  // AI classification
-  const resp = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      {
-        role: "system",
-        content: `Classifica l'intento dell'utente in una di queste categorie:
-- "search": cerca uno yacht (destinazione, budget, ospiti, charter, noleggio).
-- "booking": domande su prenotazioni, durata, pagamenti.
-- "info": definizioni o spiegazioni (es. cosa significa charter, cos'è APA).
-- "smalltalk": saluti, battute, convenevoli.
-- "other": tutto il resto.
-
-Rispondi SOLO con una di queste parole.`,
-      },
-      { role: "user", content: message },
-    ],
-    temperature: 0,
-  });
-
-  const intent = resp.choices[0].message.content?.toLowerCase().trim() as any;
-  return ["search","booking","info","smalltalk","other"].includes(intent) ? intent : "other";
-}
-
-// === Estrazione filtri yacht ===
+// --- Estrazione filtri ---
 async function extractFilters(text: string): Promise<any> {
   const resp = await openai.chat.completions.create({
     model: "gpt-4o-mini",
@@ -121,16 +77,16 @@ async function extractFilters(text: string): Promise<any> {
         content: `Estrai i filtri di ricerca yacht dall'input utente.
 Rispondi SOLO in JSON con schema:
 {
-  "destinations": ["Australia","Bahamas","Florida","Hong Kong","Mar Mediterraneo","Costa Azzurra","Croazia","East Med","Grecia","Isole Baleari","Italia","Mar Ionio","Mediterraneo Occidentale","Mediterraneo Orientale","Oceano Indiano","Oceano Pacifico Meridionale"],
+  "destinations": ["..."],
   "budget_max": int,
   "guests_min": int
 }
-Se l'utente scrive una destinazione non presente, scegli la più simile tra quelle indicate.`,
+Scegli la destinazione più simile tra: ${KNOWN_DESTINATIONS.join(", ")}`
       },
-      { role: "user", content: text },
+      { role: "user", content: text }
     ],
     temperature: 0,
-    response_format: { type: "json_object" },
+    response_format: { type: "json_object" }
   });
 
   try {
@@ -140,62 +96,61 @@ Se l'utente scrive una destinazione non presente, scegli la più simile tra quel
   }
 }
 
-// === Query su Supabase ===
+// --- Query yachts ---
 async function queryYachts(filters: any) {
-  let query = supabase.from("yachts").select("*").limit(10);
+  let yachts: any[] = [];
+  const destinations = filters.destinations || [];
 
-  if (filters.guests_min) query = query.gte("guests", filters.guests_min);
-  if (filters.budget_max) query = query.lte("rate_high", filters.budget_max);
+  let expanded: string[] = [];
+  for (const d of destinations) {
+    const key = d.toLowerCase();
+    if (DEST_EQUIV[key]) expanded.push(...DEST_EQUIV[key]);
+    expanded.push(d);
+  }
+  expanded = [...new Set(expanded)];
 
-  if (filters.destinations?.length > 0) {
-    query = query.overlaps("destinations", filters.destinations);
+  // step 1: match diretto
+  if (expanded.length > 0) {
+    const { data } = await supabase.from("yachts").select("*").overlaps("destinations", expanded).limit(20);
+    if (data?.length) yachts = data;
   }
 
-  const { data, error } = await query;
-  if (error) {
-    console.error("Supabase query error:", error);
-    return [];
+  // step 2: fallback LIKE
+  if (yachts.length === 0 && expanded.length > 0) {
+    const orFilters = expanded.map((d) => `destinations::text.ilike.%${d}%`).join(",");
+    const { data } = await supabase.from("yachts").select("*").or(orFilters).limit(20);
+    if (data?.length) yachts = data;
   }
-  return data || [];
+
+  // step 3: macro fallback
+  if (yachts.length === 0 && destinations.length > 0) {
+    const key = destinations[0].toLowerCase();
+    if (DEST_FALLBACK[key]) {
+      const { data } = await supabase.from("yachts").select("*").overlaps("destinations", DEST_FALLBACK[key]).limit(20);
+      if (data?.length) yachts = data;
+    }
+  }
+
+  // deduplica per slug
+  const unique: Record<string, any> = {};
+  for (const y of yachts) if (!unique[y.slug]) unique[y.slug] = y;
+  return Object.values(unique);
 }
 
-// === Deduplica yachts ===
-function dedupYachts(yachts: any[]) {
-  const seen = new Set();
-  return yachts.filter((y) => {
-    const key = y.slug || y.wp_id || y.id;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-// === Formattazione yacht ===
+// --- Format yacht card ---
 function formatYachtItem(y: any) {
   const name = y.name || "Yacht";
   const model = y.model || y.series || "";
   const permalink = y.permalink || "#";
-  const img =
-    Array.isArray(y.gallery_urls) && y.gallery_urls.length > 0
-      ? y.gallery_urls[0]
-      : null;
+  const img = y.gallery_urls?.[0] || null;
 
   const len = y.length_m ? `${Number(y.length_m).toFixed(1)} m` : "";
   const yr = y.year ? `${y.year}` : "";
-  const gc =
-    y.guests || y.cabins
-      ? `${y.guests || "-"} ospiti / ${y.cabins || "-"} cabine`
-      : "";
-  const rate =
-    y.rate_low || y.rate_high
-      ? `${y.rate_low?.toLocaleString("it-IT") || "-"} - ${
-          y.rate_high?.toLocaleString("it-IT") || "-"
-        } ${y.currency || "EUR"}`
-      : "";
-  const dest =
-    Array.isArray(y.destinations) && y.destinations.length
-      ? y.destinations.join(", ")
-      : "";
+  const gc = (y.guests || y.cabins) ? `${y.guests||"-"} ospiti / ${y.cabins||"-"} cabine` : "";
+  const rate = (y.rate_low || y.rate_high)
+    ? `${y.rate_low?.toLocaleString("it-IT") || "-"} - ${y.rate_high?.toLocaleString("it-IT") || "-"} ${y.currency||"EUR"}`
+    : "";
+  const dest = y.destinations?.length ? y.destinations.join(", ") : "";
   const hl = y.highlights?.[0] || "";
 
   let md = `### ${name} (${model})\n`;
@@ -211,99 +166,67 @@ function formatYachtItem(y: any) {
   return md;
 }
 
-// === Handler principale ===
+// --- Handler principale ---
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") return res.status(200).end();
+  res.setHeader("Access-Control-Allow-Origin","*");
+  res.setHeader("Access-Control-Allow-Methods","GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers","Content-Type");
+  if (req.method==="OPTIONS") return res.status(200).end();
 
   try {
-    const body =
-      typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+    const body = typeof req.body==="string" ? JSON.parse(req.body) : (req.body||{});
+    const userMessage = body.message || "";
 
-    // Supporto sia message che conversation
-    let userMessage = body.message || "";
-    if (!userMessage && Array.isArray(body.conversation)) {
-      const lastUser = body.conversation
-        .filter((m: any) => m.role === "user")
-        .pop();
-      if (lastUser) userMessage = lastUser.content;
-    }
-
-    if (!userMessage) {
-      return res.status(400).json({ error: "No user message provided" });
-    }
-
-    // 1) Classifica intento
     const intent = await classifyIntent(userMessage);
 
-    // 2) Gestione per intento
-    if (intent === "smalltalk") {
+    if (intent === "info") {
       return res.status(200).json({
-        answer_markdown: "🙂 Certo! Dimmi pure, sono qui per aiutarti.",
-        mode: "smalltalk",
+        answer_markdown: "Un charter è il noleggio esclusivo di uno yacht con equipaggio. Puoi scegliere destinazione, periodo e servizi inclusi. Vuoi che ti mostri anche alcune barche disponibili?",
+        intent
       });
     }
 
-    if (intent === "booking" || intent === "info") {
-      // Match su FAQ
-      const key = Object.keys(FAQ).find((q) =>
-        userMessage.toLowerCase().includes(q)
-      );
-      if (key) {
-        return res.status(200).json({
-          answer_markdown: FAQ[key],
-          mode: intent,
-        });
-      }
-
-      // fallback GPT
-      const resp = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content:
-              "Sei l'assistente di Sanlorenzo Charter Fleet. Rispondi in modo breve e chiaro a domande su prenotazioni e informazioni.",
-          },
-          { role: "user", content: userMessage },
-        ],
+    if (intent === "booking") {
+      return res.status(200).json({
+        answer_markdown: "Per prenotare uno yacht basta scegliere la barca e le date. Ti mettiamo in contatto con un nostro consulente che finalizzerà contratto, APA e dettagli. Vuoi lasciare i tuoi contatti?",
+        intent
       });
-      const reply = resp.choices[0].message.content || "🙂";
-      return res.status(200).json({ answer_markdown: reply, mode: intent });
+    }
+
+    if (intent === "smalltalk") {
+      return res.status(200).json({ answer_markdown: "Ciao 👋 Come posso aiutarti con la tua prossima crociera?", intent });
     }
 
     if (intent === "search") {
       const filters = await extractFilters(userMessage);
-      let yachts = await queryYachts(filters);
-      yachts = dedupYachts(yachts);
+      const yachts = await queryYachts(filters);
 
-      let answer = "";
       if (yachts.length > 0) {
-        const list = yachts.slice(0, 5).map(formatYachtItem).join("\n\n");
-        answer = `Ecco alcune opzioni in linea con la tua richiesta:\n\n${list}\n\n*Tariffe a settimana, VAT & APA esclusi.*`;
+        const list = yachts.slice(0,5).map(formatYachtItem).join("\n\n");
+        return res.status(200).json({
+          answer_markdown: `Ho trovato queste opzioni per te:\n\n${list}\n\n*Tariffe a settimana, VAT & APA esclusi.*`,
+          intent,
+          filters_used: filters,
+          yachts
+        });
       } else {
-        answer =
-          "Non ho trovato yacht esatti per questi criteri. Vuoi che ti proponga aree vicine o con budget leggermente diverso?";
+        return res.status(200).json({
+          answer_markdown: "Non ho trovato nulla con i criteri inseriti. Vuoi modificare budget o destinazione?",
+          intent,
+          filters_used: filters,
+          yachts:[]
+        });
       }
-
-      return res.status(200).json({
-        answer_markdown: answer,
-        mode: "search",
-        filters_used: filters,
-        yachts,
-      });
     }
 
-    // other
     return res.status(200).json({
-      answer_markdown:
-        "Posso aiutarti a trovare il tuo prossimo yacht o darti informazioni sui nostri servizi. Dimmi pure cosa cerchi 🚤",
-      mode: "other",
+      answer_markdown: "Posso aiutarti a cercare uno yacht o rispondere a domande sul charter. Cosa preferisci?",
+      intent
     });
-  } catch (err: any) {
-    console.error("Assistant error:", err);
-    res.status(500).json({ error: err.message || String(err) });
+
+  } catch(err:any) {
+    console.error("Assistant error:",err);
+    res.status(500).json({ error: err.message||String(err) });
   }
 }
+
