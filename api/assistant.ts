@@ -8,28 +8,26 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-// --- Intent detection ---
-async function detectIntent(text: string): Promise<"general" | "charter"> {
-  const resp = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      {
-        role: "system",
-        content: `Devi classificare il messaggio dell'utente.
-Rispondi SOLO con:
-- "general" se è una domanda di spiegazione/FAQ (es: cosa significa APA, come prenotare, durata, cos'è un charter, ecc).
-- "charter" se l'utente cerca yacht, charter, destinazioni, budget, ospiti, ecc.`
-      },
-      { role: "user", content: text }
-    ],
-    temperature: 0
-  });
+// --- FAQ pronte ---
+const FAQ: Record<string, string> = {
+  "apa": "💡 **APA (Advance Provisioning Allowance)** è un fondo anticipato (20-30% del noleggio) usato per coprire spese come carburante, porti, cibo e bevande. Alla fine viene rendicontato e l’eccedenza restituita.",
+  "charter": "⛵ **Charter** significa noleggio: puoi noleggiare uno yacht per una settimana (o più) con equipaggio incluso.",
+  "prenotare": "📅 Puoi prenotare uno yacht contattandoci: ti chiederemo destinazione, periodo, numero di ospiti e budget, poi prepareremo una proposta.",
+  "giorno": "🌞 In genere i charter sono settimanali, ma in alcune destinazioni sono disponibili anche noleggi giornalieri.",
+};
 
-  const result = resp.choices[0].message.content?.trim().toLowerCase();
-  return result === "charter" ? "charter" : "general";
+// --- Controlla FAQ ---
+function checkFAQ(userMessage: string): string | null {
+  const lower = userMessage.toLowerCase();
+  for (const key in FAQ) {
+    if (lower.includes(key)) {
+      return FAQ[key];
+    }
+  }
+  return null;
 }
 
-// --- AI filter extraction ---
+// --- Estrazione filtri con AI ---
 async function extractFilters(text: string): Promise<any> {
   const resp = await openai.chat.completions.create({
     model: "gpt-4o-mini",
@@ -63,35 +61,38 @@ Se l'utente scrive una destinazione non presente, scegli la più simile tra ques
   }
 }
 
-// --- Query yachts ---
+// --- Query Yachts ---
 async function queryYachts(filters: any) {
   const destinations = filters.destinations || [];
-  let yachts: any[] = [];
+  const budgetMax = filters.budget_max || 0;
+  const guestsMin = filters.guests_min || 0;
+
+  let query = supabase.from("yachts").select("*");
 
   if (destinations.length > 0) {
-    const { data } = await supabase
-      .from("yachts")
-      .select("*")
-      .overlaps("destinations", destinations)
-      .limit(20);
-    if (data && data.length > 0) yachts = data;
+    query = query.overlaps("destinations", destinations);
   }
 
-  if (yachts.length === 0) {
-    const { data } = await supabase.from("yachts").select("*").limit(10);
-    if (data) yachts = data;
+  if (budgetMax > 0) {
+    query = query.lte("rate_low", budgetMax);
   }
 
-  // deduplica per slug
+  if (guestsMin > 0) {
+    query = query.gte("guests", guestsMin);
+  }
+
+  const { data } = await query.limit(20);
+
+  // deduplica
   const unique: Record<string, any> = {};
-  for (const y of yachts) {
+  for (const y of data || []) {
     if (!unique[y.slug]) unique[y.slug] = y;
   }
 
   return Object.values(unique);
 }
 
-// --- Format yacht card ---
+// --- Format Yacht Card ---
 function formatYachtItem(y: any) {
   const name = y.name || "Yacht";
   const model = y.model || y.series || "";
@@ -132,7 +133,7 @@ function formatYachtItem(y: any) {
   return md;
 }
 
-// --- Main handler ---
+// --- Handler principale ---
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -140,54 +141,60 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method === "OPTIONS") return res.status(200).end();
 
   try {
-    const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+    const body =
+      typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
     const conversation = body.conversation || [];
-    const userMessage = body.message || conversation[conversation.length - 1]?.content || "";
+    const userMessage =
+      body.message || conversation[conversation.length - 1]?.content || "";
 
-    // 1. Intent detection
-    const intent = await detectIntent(userMessage);
-
-    if (intent === "general") {
-      // risposta diretta AI
-      const aiResp = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `Sei l'assistente ufficiale di Sanlorenzo Charter Fleet.
-Puoi rispondere a domande generali (es: cos'è APA, come prenotare, durata minima, significato di charter, ecc).
-Rispondi in modo chiaro, utile e conciso. Non proporre yacht in questo caso.`
-          },
-          { role: "user", content: userMessage }
-        ]
-      });
-
-      const aiText = aiResp.choices[0].message.content || "Posso aiutarti con altre informazioni.";
+    // 1. Controllo FAQ
+    const faq = checkFAQ(userMessage);
+    if (faq) {
       return res.status(200).json({
-        answer_markdown: aiText,
+        answer_markdown: faq,
         filters_used: {},
         yachts: [],
-        source: "ai"
+        source: "faq"
       });
     }
 
-    // 2. Intent = charter → cerca yacht
+    // 2. Provo a estrarre filtri
     const filters = await extractFilters(userMessage);
     const yachts = await queryYachts(filters);
 
-    let answer = "";
+    // 3. Se ho yacht → mostro yacht
     if (yachts.length > 0) {
       const list = yachts.slice(0, 5).map(formatYachtItem).join("\n\n");
-      answer = `Ho trovato queste opzioni per te:\n\n${list}\n\nVuoi una proposta personalizzata? Posso raccogliere i tuoi contatti.\n*Tariffe a settimana, VAT & APA esclusi.*`;
-    } else {
-      answer = "Non ho trovato nulla con i criteri inseriti. Vuoi modificare budget o destinazione?";
+      const answer = `Ho trovato queste opzioni per te:\n\n${list}\n\nVuoi una proposta personalizzata? Posso raccogliere i tuoi contatti.\n*Tariffe a settimana, VAT & APA esclusi.*`;
+
+      return res.status(200).json({
+        answer_markdown: answer,
+        filters_used: filters,
+        yachts,
+        source: "yacht"
+      });
     }
 
+    // 4. Se non ho yacht e non è FAQ → chiedo all’AI di rispondere liberamente
+    const aiResp = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content:
+            "Sei l'assistente di Sanlorenzo Charter Fleet. Rispondi in modo utile e conciso a domande su charter yacht, Sanlorenzo, APA, prenotazioni e destinazioni. Se possibile, rispondi in italiano."
+        },
+        { role: "user", content: userMessage }
+      ],
+      temperature: 0.5
+    });
+
+    const aiAnswer = aiResp.choices[0].message.content || "Posso aiutarti!";
     res.status(200).json({
-      answer_markdown: answer,
+      answer_markdown: aiAnswer,
       filters_used: filters,
-      yachts,
-      source: "yacht"
+      yachts: [],
+      source: "ai"
     });
   } catch (err: any) {
     console.error("Assistant error:", err);
