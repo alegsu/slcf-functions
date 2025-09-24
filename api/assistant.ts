@@ -11,21 +11,10 @@ const supabase = createClient(
 // --- FAQ dictionary ---
 const FAQ: Record<string, string> = {
   "apa": "💡 **APA (Advance Provisioning Allowance)** è un fondo anticipato (20-30% del noleggio) usato per coprire spese come carburante, porti, cibo e bevande. Alla fine viene rendicontato e l’eccedenza restituita.",
-  "prenotare": "📌 Puoi prenotare uno yacht contattandoci dopo aver scelto la barca. Ti guideremo con contratto MYBA e assistenza completa.",
-  "giorno": "⏳ Normalmente i charter si intendono settimanali, ma su richiesta alcuni yacht accettano noleggi giornalieri, soprattutto in bassa stagione o per eventi speciali.",
-  "cosa significa charter": "🚤 'Charter' significa noleggiare uno yacht con equipaggio, per vacanze esclusive e personalizzate."
+  "prenotare": "📅 Puoi prenotare uno yacht contattandoci: ti chiederemo destinazione, periodo, numero di ospiti e budget, poi prepareremo una proposta.",
+  "giorno": "🌞 In genere i charter sono settimanali, ma in alcune destinazioni sono disponibili anche noleggi giornalieri.",
+  "charter": "⛵ **Charter** significa noleggio: puoi noleggiare uno yacht per una settimana (o più) con equipaggio incluso."
 };
-
-// --- FAQ matcher ---
-function checkFAQ(userMessage: string): string | null {
-  const lower = userMessage.toLowerCase();
-  for (const key in FAQ) {
-    if (lower.includes(key)) {
-      return FAQ[key];
-    }
-  }
-  return null;
-}
 
 // --- AI filter extraction ---
 async function extractFilters(text: string): Promise<any> {
@@ -80,7 +69,7 @@ async function queryYachts(filters: any) {
     if (data) yachts = data;
   }
 
-  // deduplica
+  // deduplica per slug
   const unique: Record<string, any> = {};
   for (const y of yachts) {
     if (!unique[y.slug]) unique[y.slug] = y;
@@ -142,19 +131,26 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const conversation = body.conversation || [];
     const userMessage = body.message || conversation[conversation.length - 1]?.content || "";
 
-    // 1. Prima controlliamo se la richiesta è una FAQ
-    const faqAnswers: Record<string, string> = {
-      "apa": "💡 **APA (Advance Provisioning Allowance)** è un fondo anticipato (20-30% del noleggio) usato per coprire spese come carburante, porti, cibo e bevande. Alla fine viene rendicontato e l’eccedenza restituita.",
-      "charter": "⛵ **Charter** significa noleggio: puoi noleggiare uno yacht per una settimana (o più) con equipaggio incluso.",
-      "prenotare": "📅 Puoi prenotare uno yacht contattandoci: ti chiederemo destinazione, periodo, numero di ospiti e budget, poi prepareremo una proposta.",
-      "giorno": "🌞 In genere i charter sono settimanali, ma in alcune destinazioni sono disponibili anche noleggi giornalieri.",
-    };
+    // 1. Proviamo estrazione e query yacht
+    const filters = await extractFilters(userMessage);
+    const yachts = await queryYachts(filters);
 
+    if (yachts.length > 0) {
+      const list = yachts.slice(0, 5).map(formatYachtItem).join("\n\n");
+      return res.status(200).json({
+        answer_markdown: `Ho trovato queste opzioni per te:\n\n${list}\n\nVuoi una proposta personalizzata? Posso raccogliere i tuoi contatti.\n*Tariffe a settimana, VAT & APA esclusi.*`,
+        filters_used: filters,
+        yachts,
+        source: "yacht"
+      });
+    }
+
+    // 2. Se non ci sono yacht, cerchiamo FAQ
     const msgLower = userMessage.toLowerCase();
-    for (const key in faqAnswers) {
+    for (const key in FAQ) {
       if (msgLower.includes(key)) {
         return res.status(200).json({
-          answer_markdown: faqAnswers[key],
+          answer_markdown: FAQ[key],
           filters_used: {},
           yachts: [],
           source: "faq"
@@ -162,29 +158,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    // 2. Altrimenti, proviamo ad estrarre filtri yacht
-    const filters = await extractFilters(userMessage);
-    const yachts = await queryYachts(filters);
-
-    let answer = "";
-    if (yachts.length > 0) {
-      const list = yachts.slice(0, 5).map(formatYachtItem).join("\n\n");
-      answer = `Ho trovato queste opzioni per te:\n\n${list}\n\nVuoi una proposta personalizzata? Posso raccogliere i tuoi contatti.\n*Tariffe a settimana, VAT & APA esclusi.*`;
-    } else {
-      answer = "Non ho trovato nulla con i criteri inseriti. Vuoi modificare budget o destinazione?";
-    }
-
-    res.status(200).json({
-      answer_markdown: answer,
+    // 3. Nessun match
+    return res.status(200).json({
+      answer_markdown: "Non ho trovato nulla con i criteri inseriti. Vuoi modificare budget o destinazione?",
       filters_used: filters,
-      yachts,
-      source: "yacht"
+      yachts: [],
+      source: "none"
     });
   } catch (err: any) {
     console.error("Assistant error:", err);
     res.status(500).json({ error: err.message || String(err) });
   }
 }
+
 
 
  
