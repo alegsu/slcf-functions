@@ -8,34 +8,20 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-// Destinazioni valide (esattamente come nel DB)
-const VALID_DESTINATIONS = [
-  "Australia",
-  "Bahamas",
-  "Florida",
-  "Hong Kong",
-  "Mar Mediterraneo",
-  "Costa Azzurra",
-  "Croazia",
-  "East Med",
-  "Grecia",
-  "Isole Baleari",
-  "Italia",
-  "Mar Ionio",
-  "Mediterraneo Occidentale",
-  "Mediterraneo Orientale",
-  "Oceano Indiano",
-  "Oceano Pacifico Meridionale"
-];
+// --- Macro aree / sinonimi ---
+const DEST_EQUIV: Record<string, string[]> = {
+  "cote d'azure": ["Costa Azzurra"],
+  "cote d'azur": ["Costa Azzurra"],
+  "riviera francese": ["Costa Azzurra", "French Riviera"],
+  "mediterranean": ["Mar Mediterraneo"],
+  "west med": ["Mediterraneo Occidentale"],
+  "east med": ["East Med", "Mediterraneo Orientale"],
+  "caribbean": ["Bahamas"],
+  "caraibi": ["Bahamas"],
+  "miami": ["Florida"],
+};
 
-// Mappa di normalizzazione (lowercase → DB name)
-const DEST_MAP: Record<string, string> = {};
-VALID_DESTINATIONS.forEach((d) => {
-  DEST_MAP[d.toLowerCase()] = d;
-  DEST_MAP[d.toLowerCase().replace(/-/g, " ")] = d;
-});
-
-// --- Estrai filtri dall'AI ---
+// --- Estrazione filtri con AI ---
 async function extractFilters(text: string): Promise<any> {
   const resp = await openai.chat.completions.create({
     model: "gpt-4o-mini",
@@ -45,59 +31,65 @@ async function extractFilters(text: string): Promise<any> {
         content: `Estrai i filtri di ricerca yacht dall'input utente.
 Rispondi SOLO in JSON con schema:
 {
-  "destinations": [string],
+  "destinations": [
+    "Australia","Bahamas","Florida","Hong Kong","Mar Mediterraneo",
+    "Costa Azzurra","Croazia","East Med","Grecia","Isole Baleari",
+    "Italia","Mar Ionio","Mediterraneo Occidentale","Mediterraneo Orientale",
+    "Oceano Indiano","Oceano Pacifico Meridionale"
+  ],
   "budget_max": int,
   "guests_min": int
 }
-Le destinazioni possibili sono: ${VALID_DESTINATIONS.join(", ")}.
-Se l'utente scrive varianti (es: cote d'azur, french riviera, caraibi),
-scegli la più simile tra queste.`
+Se l'utente scrive una destinazione non presente, scegli la più simile tra queste.`
       },
       { role: "user", content: text }
     ],
     temperature: 0,
-    response_format: { type: "json_object" }
+    response_format: { type: "json_object" },
   });
 
   try {
-    const parsed = JSON.parse(resp.choices[0].message.content || "{}");
-
-    // normalizza destinazioni
-    if (parsed.destinations && Array.isArray(parsed.destinations)) {
-      parsed.destinations = parsed.destinations
-        .map((d: string) => DEST_MAP[d.toLowerCase()] || d)
-        .filter((d: string) => VALID_DESTINATIONS.includes(d));
-    }
-    return parsed;
+    return JSON.parse(resp.choices[0].message.content || "{}");
   } catch {
     return {};
   }
 }
 
-// --- Query yachts ---
+// --- Query su Supabase ---
 async function queryYachts(filters: any) {
   let yachts: any[] = [];
   const destinations = filters.destinations || [];
 
-  if (destinations.length > 0) {
-    // Step 1: overlaps
+  // Sinonimi espansi
+  let expanded: string[] = [];
+  for (const d of destinations) {
+    const key = d.toLowerCase();
+    if (DEST_EQUIV[key]) expanded.push(...DEST_EQUIV[key]);
+    expanded.push(d);
+  }
+  expanded = [...new Set(expanded)];
+
+  // Step 1: match diretto
+  if (expanded.length > 0) {
     const { data } = await supabase
       .from("yachts")
       .select("*")
-      .overlaps("destinations", destinations)
+      .overlaps("destinations", expanded)
       .limit(20);
     if (data && data.length > 0) yachts = data;
+  }
 
-    // Step 2: fallback LIKE
-    if (yachts.length === 0) {
-      const term = destinations[0];
-      const { data: likeData } = await supabase
-        .from("yachts")
-        .select("*")
-        .ilike("destinations::text", `%${term}%`)
-        .limit(20);
-      if (likeData && likeData.length > 0) yachts = likeData;
-    }
+  // Step 2: fallback LIKE
+  if (yachts.length === 0 && expanded.length > 0) {
+    const orFilters = expanded
+      .map((d) => `destinations::text.ilike.%${d}%`)
+      .join(",");
+    const { data } = await supabase
+      .from("yachts")
+      .select("*")
+      .or(orFilters)
+      .limit(20);
+    if (data && data.length > 0) yachts = data;
   }
 
   // Deduplica per slug
@@ -105,14 +97,15 @@ async function queryYachts(filters: any) {
   for (const y of yachts) {
     if (!unique[y.slug]) unique[y.slug] = y;
   }
+
   return Object.values(unique);
 }
 
-// --- Format yacht card ---
+// --- Formattazione yacht ---
 function formatYachtItem(y: any) {
   const name = y.name || "Yacht";
   const model = y.model || y.series || "";
-  const permalink = y.permalink || "#";
+  const permalink = y.source_url || y.permalink || "#";
   const img =
     Array.isArray(y.gallery_urls) && y.gallery_urls.length > 0
       ? y.gallery_urls[0]
@@ -158,14 +151,24 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   try {
     const body =
-      typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
-    const userMessage = body.message || "";
+      typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+
+    // ✅ Supporta sia "message" che "conversation"
+    let userMessage = body.message || "";
+    if (!userMessage && Array.isArray(body.conversation)) {
+      userMessage =
+        body.conversation.filter((m: any) => m.role === "user").pop()?.content ||
+        "";
+    }
+
+    if (!userMessage) {
+      return res.status(400).json({ error: "Nessun messaggio fornito" });
+    }
 
     // Estrai filtri
     const filters = await extractFilters(userMessage);
-    console.log("Filters estratti:", filters);
 
-    // Query yachts
+    // Query
     const yachts = await queryYachts(filters);
 
     let answer = "";
