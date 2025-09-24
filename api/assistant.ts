@@ -8,15 +8,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-// --- FAQ dictionary ---
-const FAQ: Record<string, string> = {
-  "apa": "💡 **APA (Advance Provisioning Allowance)** è un fondo anticipato (20-30% del noleggio) usato per coprire spese come carburante, porti, cibo e bevande. Alla fine viene rendicontato e l’eccedenza restituita.",
-  "prenotare": "📅 Puoi prenotare uno yacht contattandoci: ti chiederemo destinazione, periodo, numero di ospiti e budget, poi prepareremo una proposta.",
-  "giorno": "🌞 In genere i charter sono settimanali, ma in alcune destinazioni sono disponibili anche noleggi giornalieri.",
-  "charter": "⛵ **Charter** significa noleggio: puoi noleggiare uno yacht per una settimana (o più) con equipaggio incluso."
-};
-
-// --- AI filter extraction ---
+// --- Estrai filtri yacht ---
 async function extractFilters(text: string): Promise<any> {
   const resp = await openai.chat.completions.create({
     model: "gpt-4o-mini",
@@ -50,7 +42,7 @@ Se l'utente scrive una destinazione non presente, scegli la più simile tra ques
   }
 }
 
-// --- Query yachts ---
+// --- Query yacht dal DB ---
 async function queryYachts(filters: any) {
   const destinations = filters.destinations || [];
   let yachts: any[] = [];
@@ -78,7 +70,7 @@ async function queryYachts(filters: any) {
   return Object.values(unique);
 }
 
-// --- Format yacht card ---
+// --- Format card yacht ---
 function formatYachtItem(y: any) {
   const name = y.name || "Yacht";
   const model = y.model || y.series || "";
@@ -127,11 +119,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method === "OPTIONS") return res.status(200).end();
 
   try {
-    const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+    const body =
+      typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
     const conversation = body.conversation || [];
-    const userMessage = body.message || conversation[conversation.length - 1]?.content || "";
+    const userMessage =
+      body.message ||
+      conversation[conversation.length - 1]?.content ||
+      "";
 
-    // 1. Proviamo estrazione e query yacht
+    // 1. Prova query yacht
     const filters = await extractFilters(userMessage);
     const yachts = await queryYachts(filters);
 
@@ -145,28 +141,36 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
     }
 
-    // 2. Se non ci sono yacht, cerchiamo FAQ
-    const msgLower = userMessage.toLowerCase();
-    for (const key in FAQ) {
-      if (msgLower.includes(key)) {
-        return res.status(200).json({
-          answer_markdown: FAQ[key],
-          filters_used: {},
-          yachts: [],
-          source: "faq"
-        });
-      }
-    }
+    // 2. Nessun yacht → fallback AI
+    const aiResp = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: `Sei l'assistente ufficiale di Sanlorenzo Charter Fleet.
+Puoi:
+- Rispondere a domande generali sul mondo del charter e sugli yacht.
+- Rispondere a domande pratiche (es. cosa significa APA, come prenotare, durata charter, ecc).
+- Fornire informazioni sul brand Sanlorenzo, sul servizio "Sanlorenzo Charter Fleet" e su come funziona.
+- Non inventare yacht o destinazioni: se non sono nel database, non proporli.`
+        },
+        { role: "user", content: userMessage }
+      ],
+      temperature: 0.6
+    });
 
-    // 3. Nessun match
+    const aiText =
+      aiResp.choices[0].message.content ||
+      "Posso aiutarti con altre informazioni sul charter.";
     return res.status(200).json({
-      answer_markdown: "Non ho trovato nulla con i criteri inseriti. Vuoi modificare budget o destinazione?",
-      filters_used: filters,
+      answer_markdown: aiText,
+      filters_used: {},
       yachts: [],
-      source: "none"
+      source: "ai"
     });
   } catch (err: any) {
     console.error("Assistant error:", err);
     res.status(500).json({ error: err.message || String(err) });
   }
 }
+
