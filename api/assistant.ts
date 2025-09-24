@@ -8,95 +8,95 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-// --- Destinazioni note dal WP ---
-const KNOWN_DESTINATIONS = [
-  "Australia","Bahamas","Florida","Hong Kong","Mar Mediterraneo",
-  "Costa Azzurra","Croazia","East Med","Grecia","Isole Baleari",
-  "Italia","Mar Ionio","Mediterraneo Occidentale","Mediterraneo Orientale",
-  "Oceano Indiano","Oceano Pacifico Meridionale"
+// Destinazioni valide (esattamente come nel DB)
+const VALID_DESTINATIONS = [
+  "Australia",
+  "Bahamas",
+  "Florida",
+  "Hong Kong",
+  "Mar Mediterraneo",
+  "Costa Azzurra",
+  "Croazia",
+  "East Med",
+  "Grecia",
+  "Isole Baleari",
+  "Italia",
+  "Mar Ionio",
+  "Mediterraneo Occidentale",
+  "Mediterraneo Orientale",
+  "Oceano Indiano",
+  "Oceano Pacifico Meridionale"
 ];
 
-// --- Sinonimi manuali ---
-const DEST_EQUIV: Record<string, string> = {
-  "cannes": "Costa Azzurra",
-  "côte d'azur": "Costa Azzurra",
-  "cote d'azur": "Costa Azzurra",
-  "french riviera": "Costa Azzurra",
-  "riviera francese": "Costa Azzurra",
-  "caribbean": "Bahamas",
-  "caraibi": "Bahamas",
-  "miami": "Florida",
-};
+// Mappa di normalizzazione (lowercase → DB name)
+const DEST_MAP: Record<string, string> = {};
+VALID_DESTINATIONS.forEach((d) => {
+  DEST_MAP[d.toLowerCase()] = d;
+  DEST_MAP[d.toLowerCase().replace(/-/g, " ")] = d;
+});
 
-// --- Fallback macro-aree ---
-const DEST_FALLBACK: Record<string, string[]> = {
-  "Costa Azzurra": ["Mediterraneo Occidentale","Italia","Corsica","Isole Baleari"],
-  "Grecia": ["Mediterraneo Orientale","Croazia","Turchia"],
-  "Croazia": ["Mediterraneo Orientale","Grecia","Italia"],
-};
-
-// --- AI extraction ---
+// --- Estrai filtri dall'AI ---
 async function extractFilters(text: string): Promise<any> {
   const resp = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     messages: [
       {
         role: "system",
-        content: `Estrai i filtri yacht dall'input utente.
-Rispondi SOLO in JSON:
+        content: `Estrai i filtri di ricerca yacht dall'input utente.
+Rispondi SOLO in JSON con schema:
 {
-  "destinations": ["..."],
+  "destinations": [string],
   "budget_max": int,
   "guests_min": int
 }
-Le destinazioni possibili sono solo queste: ${KNOWN_DESTINATIONS.join(", ")}.
-Se l'utente scrive un luogo non presente, scegli il più simile o lascia vuoto.`
+Le destinazioni possibili sono: ${VALID_DESTINATIONS.join(", ")}.
+Se l'utente scrive varianti (es: cote d'azur, french riviera, caraibi),
+scegli la più simile tra queste.`
       },
       { role: "user", content: text }
     ],
     temperature: 0,
-    response_format: { type: "json_object" },
+    response_format: { type: "json_object" }
   });
 
   try {
-    return JSON.parse(resp.choices[0].message.content || "{}");
+    const parsed = JSON.parse(resp.choices[0].message.content || "{}");
+
+    // normalizza destinazioni
+    if (parsed.destinations && Array.isArray(parsed.destinations)) {
+      parsed.destinations = parsed.destinations
+        .map((d: string) => DEST_MAP[d.toLowerCase()] || d)
+        .filter((d: string) => VALID_DESTINATIONS.includes(d));
+    }
+    return parsed;
   } catch {
     return {};
   }
 }
 
-// --- Normalizza destinazione ---
-function normalizeDest(dest: string): string {
-  if (!dest) return dest;
-  const key = dest.toLowerCase();
-  return DEST_EQUIV[key] || dest;
-}
-
 // --- Query yachts ---
 async function queryYachts(filters: any) {
   let yachts: any[] = [];
-  const destinations: string[] = (filters.destinations || []).map(normalizeDest);
+  const destinations = filters.destinations || [];
 
-  // 1. match diretto
   if (destinations.length > 0) {
+    // Step 1: overlaps
     const { data } = await supabase
       .from("yachts")
       .select("*")
       .overlaps("destinations", destinations)
       .limit(20);
     if (data && data.length > 0) yachts = data;
-  }
 
-  // 2. fallback macro
-  if (yachts.length === 0 && destinations.length > 0) {
-    const fb = DEST_FALLBACK[destinations[0]];
-    if (fb) {
-      const { data } = await supabase
+    // Step 2: fallback LIKE
+    if (yachts.length === 0) {
+      const term = destinations[0];
+      const { data: likeData } = await supabase
         .from("yachts")
         .select("*")
-        .overlaps("destinations", fb)
+        .ilike("destinations::text", `%${term}%`)
         .limit(20);
-      if (data && data.length > 0) yachts = data;
+      if (likeData && likeData.length > 0) yachts = likeData;
     }
   }
 
@@ -108,20 +108,32 @@ async function queryYachts(filters: any) {
   return Object.values(unique);
 }
 
-// --- Format yacht ---
+// --- Format yacht card ---
 function formatYachtItem(y: any) {
   const name = y.name || "Yacht";
   const model = y.model || y.series || "";
   const permalink = y.permalink || "#";
-  const img = Array.isArray(y.gallery_urls) && y.gallery_urls.length > 0 ? y.gallery_urls[0] : null;
+  const img =
+    Array.isArray(y.gallery_urls) && y.gallery_urls.length > 0
+      ? y.gallery_urls[0]
+      : null;
 
   const len = y.length_m ? `${Number(y.length_m).toFixed(1)} m` : "";
   const yr = y.year ? `${y.year}` : "";
-  const gc = (y.guests || y.cabins) ? `${y.guests || "-"} ospiti / ${y.cabins || "-"} cabine` : "";
-  const rate = (y.rate_low || y.rate_high)
-    ? `${y.rate_low?.toLocaleString("it-IT") || "-"} - ${y.rate_high?.toLocaleString("it-IT") || "-"} ${y.currency || "EUR"}`
-    : "";
-  const dest = Array.isArray(y.destinations) && y.destinations.length ? y.destinations.join(", ") : "";
+  const gc =
+    y.guests || y.cabins
+      ? `${y.guests || "-"} ospiti / ${y.cabins || "-"} cabine`
+      : "";
+  const rate =
+    y.rate_low || y.rate_high
+      ? `${y.rate_low ? y.rate_low.toLocaleString("it-IT") : "-"} - ${
+          y.rate_high ? y.rate_high.toLocaleString("it-IT") : "-"
+        } ${y.currency || "EUR"}`
+      : "";
+  const dest =
+    Array.isArray(y.destinations) && y.destinations.length
+      ? y.destinations.join(", ")
+      : "";
   const hl = y.highlights?.[0] || "";
 
   let md = `### ${name} (${model})\n`;
@@ -137,7 +149,7 @@ function formatYachtItem(y: any) {
   return md;
 }
 
-// --- Handler ---
+// --- Handler principale ---
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -145,11 +157,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method === "OPTIONS") return res.status(200).end();
 
   try {
-    const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+    const body =
+      typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
     const userMessage = body.message || "";
 
-    // Estrai filtri AI
+    // Estrai filtri
     const filters = await extractFilters(userMessage);
+    console.log("Filters estratti:", filters);
 
     // Query yachts
     const yachts = await queryYachts(filters);
@@ -159,13 +173,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const list = yachts.slice(0, 5).map(formatYachtItem).join("\n\n");
       answer = `Ho trovato queste opzioni per te:\n\n${list}\n\nVuoi una proposta personalizzata? Posso raccogliere i tuoi contatti.\n*Tariffe a settimana, VAT & APA esclusi.*`;
     } else {
-      answer = "Non ho trovato yacht disponibili. Vuoi modificare budget o destinazione?";
+      answer =
+        "Non ho trovato nulla con i criteri inseriti. Vuoi modificare budget o destinazione?";
     }
 
     res.status(200).json({
       answer_markdown: answer,
       filters_used: filters,
-      yachts,
+      yachts: yachts,
     });
   } catch (err: any) {
     console.error("Assistant error:", err);
