@@ -138,22 +138,31 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method === "OPTIONS") return res.status(200).end();
 
   try {
-    const body =
-      typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
-    const userMessage = body.message || "";
+    const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+    const conversation = body.conversation || [];
+    const userMessage = body.message || conversation[conversation.length - 1]?.content || "";
 
-    // Step 1: check FAQ
-    const faqAnswer = checkFAQ(userMessage);
-    if (faqAnswer) {
-      return res.status(200).json({
-        answer_markdown: faqAnswer,
-        filters_used: {},
-        yachts: [],
-        source: "faq"
-      });
+    // 1. Prima controlliamo se la richiesta è una FAQ
+    const faqAnswers: Record<string, string> = {
+      "apa": "💡 **APA (Advance Provisioning Allowance)** è un fondo anticipato (20-30% del noleggio) usato per coprire spese come carburante, porti, cibo e bevande. Alla fine viene rendicontato e l’eccedenza restituita.",
+      "charter": "⛵ **Charter** significa noleggio: puoi noleggiare uno yacht per una settimana (o più) con equipaggio incluso.",
+      "prenotare": "📅 Puoi prenotare uno yacht contattandoci: ti chiederemo destinazione, periodo, numero di ospiti e budget, poi prepareremo una proposta.",
+      "giorno": "🌞 In genere i charter sono settimanali, ma in alcune destinazioni sono disponibili anche noleggi giornalieri.",
+    };
+
+    const msgLower = userMessage.toLowerCase();
+    for (const key in faqAnswers) {
+      if (msgLower.includes(key)) {
+        return res.status(200).json({
+          answer_markdown: faqAnswers[key],
+          filters_used: {},
+          yachts: [],
+          source: "faq"
+        });
+      }
     }
 
-    // Step 2: estrazione filtri e query DB
+    // 2. Altrimenti, proviamo ad estrarre filtri yacht
     const filters = await extractFilters(userMessage);
     const yachts = await queryYachts(filters);
 
@@ -162,18 +171,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const list = yachts.slice(0, 5).map(formatYachtItem).join("\n\n");
       answer = `Ho trovato queste opzioni per te:\n\n${list}\n\nVuoi una proposta personalizzata? Posso raccogliere i tuoi contatti.\n*Tariffe a settimana, VAT & APA esclusi.*`;
     } else {
-      answer =
-        "Non ho trovato nulla con i criteri inseriti. Vuoi modificare budget o destinazione?";
+      answer = "Non ho trovato nulla con i criteri inseriti. Vuoi modificare budget o destinazione?";
     }
 
     res.status(200).json({
       answer_markdown: answer,
       filters_used: filters,
-      yachts: yachts,
-      source: "db"
+      yachts,
+      source: "yacht"
     });
   } catch (err: any) {
     console.error("Assistant error:", err);
     res.status(500).json({ error: err.message || String(err) });
   }
 }
+
+
+ 
