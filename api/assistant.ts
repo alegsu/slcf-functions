@@ -1,13 +1,14 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
+
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 const supabase = createClient(
   process.env.SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-// Destinazioni note
+// Destinazioni note (come salvate in Supabase/WordPress)
 const KNOWN_DESTINATIONS = [
   "Australia","Bahamas","Florida","Hong Kong","Mar Mediterraneo",
   "Costa Azzurra","Croazia","East Med","Grecia","Isole Baleari",
@@ -63,31 +64,42 @@ async function queryYachts(filters: any) {
   let yachts: any[] = [];
   let destinations = filters.destinations || [];
 
-  // normalizza sinonimi
+  // normalizza sinonimi + capitalizzazione
   destinations = destinations.map((d: string) => {
     const key = d.toLowerCase();
-    return DEST_EQUIV[key] || d;
+    const mapped = DEST_EQUIV[key] || d;
+    const known = KNOWN_DESTINATIONS.find(k => k.toLowerCase() === mapped.toLowerCase());
+    return known || mapped;
   });
 
+  // Step 1: match diretto (array overlap)
   if (destinations.length > 0) {
-    const { data } = await supabase.from("yachts").select("*").overlaps("destinations", destinations).limit(20);
+    const { data } = await supabase
+      .from("yachts")
+      .select("*")
+      .overlaps("destinations", destinations)
+      .limit(20);
     if (data?.length) yachts = data;
   }
 
-  // fallback LIKE
+  // Step 2: fallback LIKE
   if (yachts.length === 0 && destinations.length > 0) {
-    const orFilters = destinations.map((d: string) => `destinations::text.ilike.%${d}%`).join(",");
-    const { data } = await supabase.from("yachts").select("*").or(orFilters).limit(20);
+    const orFilters = destinations.map((d) => `destinations::text.ilike.%${d}%`).join(",");
+    const { data } = await supabase
+      .from("yachts")
+      .select("*")
+      .or(orFilters)
+      .limit(20);
     if (data?.length) yachts = data;
   }
 
-  // deduplica per slug
+  // Deduplica per slug
   const unique: Record<string, any> = {};
   for (const y of yachts) if (!unique[y.slug]) unique[y.slug] = y;
   return Object.values(unique);
 }
 
-// --- Prepara dati in forma leggibile ---
+// --- Prepara dati per AI ---
 function summarizeYacht(y: any) {
   return {
     name: y.name,
@@ -117,24 +129,31 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const body = typeof req.body==="string" ? JSON.parse(req.body) : (req.body||{});
     const userMessage = body.message || "";
 
-    // 1) Estrai filtri
+    // 1) Estrai filtri dall’AI
     const filters = await extractFilters(userMessage);
 
-    // 2) Query Supabase
+    // 2) Query DB
     const yachts = await queryYachts(filters);
     const simplified = yachts.slice(0,5).map(summarizeYacht);
 
-    // 3) Lascia ad AI la generazione risposta
+    // 3) Genera risposta con AI
     const resp = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
         {
           role: "system",
           content: `Sei l’assistente di Sanlorenzo Charter Fleet. 
-Hai accesso ai seguenti yacht (JSON). Usa solo questi dati per proporre opzioni.
-Se non ci sono yacht, fai domande di chiarimento (destinazione, budget, ospiti).
-Quando proponi yacht, formatta con Markdown: nome, anno, lunghezza, ospiti/cabine, tariffe, destinazioni, link e immagine.
-`
+Hai accesso ai seguenti yacht (in JSON).
+Usa solo questi dati per rispondere. 
+Se non ci sono yacht, chiedi chiarimenti (es. budget, ospiti, destinazione). 
+Quando proponi yacht, usa Markdown con:
+- Nome e modello
+- Immagine preview
+- Lunghezza, anno, ospiti/cabine
+- Tariffa settimanale
+- Destinazioni
+- Punto forte se disponibile
+- Link "Scopri di più"`
         },
         { role: "user", content: `Domanda utente: ${userMessage}` },
         { role: "assistant", content: `Risultati disponibili: ${JSON.stringify(simplified)}` }
