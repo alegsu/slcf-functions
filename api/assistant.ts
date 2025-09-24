@@ -8,20 +8,26 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-// --- Macro aree / sinonimi ---
-const DEST_EQUIV: Record<string, string[]> = {
-  "cote d'azure": ["Costa Azzurra"],
-  "cote d'azur": ["Costa Azzurra"],
-  "riviera francese": ["Costa Azzurra", "French Riviera"],
-  "mediterranean": ["Mar Mediterraneo"],
-  "west med": ["Mediterraneo Occidentale"],
-  "east med": ["East Med", "Mediterraneo Orientale"],
-  "caribbean": ["Bahamas"],
-  "caraibi": ["Bahamas"],
-  "miami": ["Florida"],
+// --- FAQ dictionary ---
+const FAQ: Record<string, string> = {
+  "apa": "💡 **APA (Advance Provisioning Allowance)** è un fondo anticipato (20-30% del noleggio) usato per coprire spese come carburante, porti, cibo e bevande. Alla fine viene rendicontato e l’eccedenza restituita.",
+  "prenotare": "📌 Puoi prenotare uno yacht contattandoci dopo aver scelto la barca. Ti guideremo con contratto MYBA e assistenza completa.",
+  "giorno": "⏳ Normalmente i charter si intendono settimanali, ma su richiesta alcuni yacht accettano noleggi giornalieri, soprattutto in bassa stagione o per eventi speciali.",
+  "cosa significa charter": "🚤 'Charter' significa noleggiare uno yacht con equipaggio, per vacanze esclusive e personalizzate."
 };
 
-// --- Estrazione filtri con AI ---
+// --- FAQ matcher ---
+function checkFAQ(userMessage: string): string | null {
+  const lower = userMessage.toLowerCase();
+  for (const key in FAQ) {
+    if (lower.includes(key)) {
+      return FAQ[key];
+    }
+  }
+  return null;
+}
+
+// --- AI filter extraction ---
 async function extractFilters(text: string): Promise<any> {
   const resp = await openai.chat.completions.create({
     model: "gpt-4o-mini",
@@ -45,7 +51,7 @@ Se l'utente scrive una destinazione non presente, scegli la più simile tra ques
       { role: "user", content: text }
     ],
     temperature: 0,
-    response_format: { type: "json_object" },
+    response_format: { type: "json_object" }
   });
 
   try {
@@ -55,44 +61,26 @@ Se l'utente scrive una destinazione non presente, scegli la più simile tra ques
   }
 }
 
-// --- Query su Supabase ---
+// --- Query yachts ---
 async function queryYachts(filters: any) {
-  let yachts: any[] = [];
   const destinations = filters.destinations || [];
+  let yachts: any[] = [];
 
-  // Sinonimi espansi
-  let expanded: string[] = [];
-  for (const d of destinations) {
-    const key = d.toLowerCase();
-    if (DEST_EQUIV[key]) expanded.push(...DEST_EQUIV[key]);
-    expanded.push(d);
-  }
-  expanded = [...new Set(expanded)];
-
-  // Step 1: match diretto
-  if (expanded.length > 0) {
+  if (destinations.length > 0) {
     const { data } = await supabase
       .from("yachts")
       .select("*")
-      .overlaps("destinations", expanded)
+      .overlaps("destinations", destinations)
       .limit(20);
     if (data && data.length > 0) yachts = data;
   }
 
-  // Step 2: fallback LIKE
-  if (yachts.length === 0 && expanded.length > 0) {
-    const orFilters = expanded
-      .map((d) => `destinations::text.ilike.%${d}%`)
-      .join(",");
-    const { data } = await supabase
-      .from("yachts")
-      .select("*")
-      .or(orFilters)
-      .limit(20);
-    if (data && data.length > 0) yachts = data;
+  if (yachts.length === 0) {
+    const { data } = await supabase.from("yachts").select("*").limit(10);
+    if (data) yachts = data;
   }
 
-  // Deduplica per slug
+  // deduplica
   const unique: Record<string, any> = {};
   for (const y of yachts) {
     if (!unique[y.slug]) unique[y.slug] = y;
@@ -101,7 +89,7 @@ async function queryYachts(filters: any) {
   return Object.values(unique);
 }
 
-// --- Formattazione yacht ---
+// --- Format yacht card ---
 function formatYachtItem(y: any) {
   const name = y.name || "Yacht";
   const model = y.model || y.series || "";
@@ -151,24 +139,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   try {
     const body =
-      typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+      typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
+    const userMessage = body.message || "";
 
-    // ✅ Supporta sia "message" che "conversation"
-    let userMessage = body.message || "";
-    if (!userMessage && Array.isArray(body.conversation)) {
-      userMessage =
-        body.conversation.filter((m: any) => m.role === "user").pop()?.content ||
-        "";
+    // Step 1: check FAQ
+    const faqAnswer = checkFAQ(userMessage);
+    if (faqAnswer) {
+      return res.status(200).json({
+        answer_markdown: faqAnswer,
+        filters_used: {},
+        yachts: [],
+        source: "faq"
+      });
     }
 
-    if (!userMessage) {
-      return res.status(400).json({ error: "Nessun messaggio fornito" });
-    }
-
-    // Estrai filtri
+    // Step 2: estrazione filtri e query DB
     const filters = await extractFilters(userMessage);
-
-    // Query
     const yachts = await queryYachts(filters);
 
     let answer = "";
@@ -184,6 +170,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       answer_markdown: answer,
       filters_used: filters,
       yachts: yachts,
+      source: "db"
     });
   } catch (err: any) {
     console.error("Assistant error:", err);
